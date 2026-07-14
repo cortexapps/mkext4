@@ -56,6 +56,22 @@ pub trait RegionSink {
 }
 ```
 
+## Performance
+
+`tools/bench.sh` (hyperfine) builds the same tree with `mke2fs -F -t ext4
+-d` and with this crate (`examples/mkfs.rs`), identical feature sets and
+inode counts, both non-lazy, output gated on `e2fsck -fn`:
+
+| benchmark | mke2fs 1.47.4 | streamext4 | speedup |
+|---|---|---|---|
+| ~120k small files (node_modules-like) | 8.02 s | 4.13 s | **1.9×** |
+| ~4.2 GiB tree with multi-GiB files | 19.3 s | 3.42 s | **5.6×** |
+
+(Apple M-series, APFS, macOS; the CI bench lane re-checks the ordering on
+Linux on every push.) The one-pass design is the difference: no staged
+tree re-walk, metadata computed once, and `zeros` regions never touch the
+sink.
+
 ## Verification philosophy
 
 The writer is never validated only by our own reader. Every image any test
