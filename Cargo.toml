@@ -1,0 +1,20 @@
+[package]
+name = "streamext4"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+description = "Deterministic, streaming, pure-Rust ext4 image builder with a verification-grade reader"
+repository = "https://github.com/cortexapps/mke2fs-rs"
+keywords = ["ext4", "filesystem", "mkfs", "deterministic", "reproducible"]
+categories = ["filesystem"]
+exclude = ["/build", "/tools", "/testdata", "/.github"]
+
+[dependencies]
+# Hardware-accelerated CRC32C (SSE4.2 / ARMv8 CRC); wrapped by src/csum.rs
+# into ext4's raw-register convention. The crate's only runtime dependency.
+crc32c = "0.6"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
