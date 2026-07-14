@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # The format oracle. DESIGN.md's verified claims are against this exact
+  # version; bumping it is a deliberate oracle upgrade, not routine chore.
+  E2FSPROGS_VERSION: 1.47.4
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache pinned e2fsprogs
+        uses: actions/cache@v4
+        with:
+          path: ~/e2fsprogs
+          key: e2fsprogs-${{ env.E2FSPROGS_VERSION }}-${{ matrix.os }}
+
+      - name: Build pinned e2fsprogs
+        run: |
+          tools/ci-e2fsprogs.sh "$E2FSPROGS_VERSION" "$HOME/e2fsprogs"
+          echo "E2FSPROGS_SBIN=$HOME/e2fsprogs/sbin" >> "$GITHUB_ENV"
+
+      - name: rustfmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: tests (unit + mke2fs differential)
+        run: cargo test
+
+      - name: docs build cleanly
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # Loop-mount kernel-oracle lane lands with the writer (phase 3): it will
+  # mount generated images and diff the tree against the declared
+  # namespace. Kept as a separate job so it can run privileged steps.
