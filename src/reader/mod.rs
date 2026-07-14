@@ -87,6 +87,16 @@ pub struct Fs<R: ReadAt> {
     fs_seed: u32,
 }
 
+impl<R: ReadAt> std::fmt::Debug for Fs<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fs")
+            .field("uuid", &self.sb.uuid)
+            .field("blocks", &self.sb.blocks_count)
+            .field("inodes", &self.sb.inodes_count)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R: ReadAt> Fs<R> {
     /// Open and validate a filesystem: superblock magic, checksum (when
     /// metadata_csum), and the incompat-feature allowlist.
@@ -106,6 +116,43 @@ impl<R: ReadAt> Fs<R> {
                 "block size {}",
                 sb.block_size()
             )));
+        }
+        // Geometry sanity: everything the reader later divides by or
+        // indexes with is validated here, exactly once — hostile images
+        // reach all of these fields.
+        if sb.blocks_per_group != spec::BLOCKS_PER_GROUP {
+            return Err(corrupt(
+                "superblock",
+                format!("blocks_per_group {}", sb.blocks_per_group),
+            ));
+        }
+        if sb.inodes_per_group == 0 || sb.inodes_per_group > spec::BLOCKS_PER_GROUP {
+            return Err(corrupt(
+                "superblock",
+                format!("inodes_per_group {}", sb.inodes_per_group),
+            ));
+        }
+        if !matches!(sb.inode_size, 128 | 256 | 512 | 1024 | 2048 | 4096) {
+            return Err(corrupt(
+                "superblock",
+                format!("inode_size {}", sb.inode_size),
+            ));
+        }
+        if sb.blocks_count == 0 {
+            return Err(corrupt("superblock", "zero block count"));
+        }
+        if u64::from(sb.inodes_count) > u64::from(sb.inodes_per_group) * sb.group_count() {
+            return Err(corrupt(
+                "superblock",
+                format!("inodes_count {} exceeds groups * ipg", sb.inodes_count),
+            ));
+        }
+        // Without meta_bg the whole GDT must fit inside the first group;
+        // this also bounds the allocation below.
+        if sb.group_count() * sb.desc_size() as u64
+            > u64::from(spec::BLOCKS_PER_GROUP) * sb.block_size()
+        {
+            return Err(corrupt("superblock", "group descriptor table too large"));
         }
         let fs_seed = if sb.feature_incompat & incompat::CSUM_SEED != 0 {
             sb.checksum_seed
@@ -167,9 +214,12 @@ impl<R: ReadAt> Fs<R> {
     }
 
     /// Raw bytes of group descriptor `g` (for checksum verification).
-    pub fn group_desc_raw(&self, g: u64) -> &[u8] {
+    pub fn group_desc_raw(&self, g: u64) -> Result<&[u8]> {
         let ds = self.sb.desc_size();
-        &self.gdt[g as usize * ds..(g as usize + 1) * ds]
+        let off = g as usize * ds;
+        self.gdt
+            .get(off..off + ds)
+            .ok_or_else(|| corrupt("group", format!("group {g} out of range")))
     }
 
     /// Read the raw inode-table slot for inode `ino` (1-based).
@@ -229,6 +279,11 @@ impl<R: ReadAt> Fs<R> {
         out: &mut Vec<FileExtent>,
     ) -> Result<()> {
         let h = ExtentHeader::decode(node)?;
+        // ext4's real maximum depth is 5; anything deeper is hostile (and
+        // would otherwise let a forged tree explode the walk).
+        if h.depth > 5 {
+            return Err(corrupt("extent tree", format!("depth {}", h.depth)));
+        }
         if let Some(d) = expect_depth {
             if h.depth != d {
                 return Err(corrupt("extent tree", "child depth mismatch"));
@@ -310,21 +365,41 @@ impl<R: ReadAt> Fs<R> {
         Ok(want)
     }
 
-    /// Read a whole file into memory. Convenience for tests/small files.
+    /// Read a whole file into memory. Convenience for tests/small files;
+    /// refuses sizes larger than the filesystem itself (hostile images
+    /// could otherwise demand absurd allocations) — stream through
+    /// [`Fs::read_file_at`] for big files.
     pub fn read_file(&self, ino: u32) -> Result<Vec<u8>> {
         let inode = self.inode(ino)?;
+        if inode.size > self.sb.blocks_count * self.block_size {
+            return Err(corrupt(
+                "inode",
+                format!("inode {ino} size {} exceeds filesystem", inode.size),
+            ));
+        }
         let extents = self.extents(ino, &inode)?;
-        let mut buf = vec![0u8; usize::try_from(inode.size).expect("file too large for memory")];
+        let mut buf = vec![
+            0u8;
+            usize::try_from(inode.size).map_err(|_| Error::Unsupported(
+                "file too large for read_file".into()
+            ))?
+        ];
         self.read_file_at(&inode, &extents, 0, &mut buf)?;
         Ok(buf)
     }
 
     /// A symlink's target: inline for fast symlinks, content block for
-    /// slow ones.
+    /// slow ones (which the format bounds to one block).
     pub fn symlink_target(&self, ino: u32) -> Result<Vec<u8>> {
         let inode = self.inode(ino)?;
         if let Some(t) = inode.fast_symlink_target() {
             return Ok(t.to_vec());
+        }
+        if inode.size >= self.block_size {
+            return Err(corrupt(
+                "symlink",
+                format!("inode {ino} target size {}", inode.size),
+            ));
         }
         self.read_file(ino)
     }
@@ -349,7 +424,7 @@ impl<R: ReadAt> Fs<R> {
             let data = self.read_block(block)?;
             if is_htree {
                 if logical == 0 {
-                    let root = DxRootView::parse(&data)?;
+                    DxRootView::parse(&data)?; // structure check only
                     out.push(DirEntry {
                         inode: crate::le::u32(&data, 0),
                         file_type: data[7],
@@ -360,7 +435,6 @@ impl<R: ReadAt> Fs<R> {
                         file_type: data[0x13],
                         name: b"..".to_vec(),
                     });
-                    drop(root);
                     continue;
                 }
                 if crate::le::u32(&data, 0) == 0
@@ -392,7 +466,9 @@ impl<R: ReadAt> Fs<R> {
         None
     }
 
-    /// Look up one name in a directory.
+    /// Look up one name in a directory. Deliberately a linear scan
+    /// (this reader is a verification oracle, not a fast path), so it
+    /// works identically on linear and hash-indexed directories.
     pub fn lookup(&self, dir_ino: u32, name: &[u8]) -> Result<Option<u32>> {
         Ok(self
             .read_dir(dir_ino)?

@@ -61,6 +61,7 @@ impl RegionSink for VecSink {
 /// are elided (the file is extended sparsely instead), so untouched
 /// space costs no I/O.
 #[cfg(unix)]
+#[derive(Debug)]
 pub struct FileSink {
     file: std::fs::File,
     len: u64,
@@ -79,7 +80,8 @@ impl FileSink {
         })
     }
 
-    /// Flush and return the file.
+    /// Return the file (nothing is buffered; call `sync_all` yourself if
+    /// you need durability guarantees).
     pub fn into_file(self) -> std::fs::File {
         self.file
     }
@@ -101,6 +103,7 @@ impl RegionSink for FileSink {
 
 /// Wraps a sink and asserts the exactly-once coverage contract; used by
 /// the test suite around every image build.
+#[derive(Debug)]
 pub struct CheckingSink<S> {
     inner: S,
     /// Sorted, disjoint covered ranges.

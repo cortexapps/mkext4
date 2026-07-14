@@ -123,11 +123,6 @@ impl Geometry {
         (1..self.groups).filter(|&g| self.has_backup(g)).collect()
     }
 
-    /// The flex-span leader group of group `g`.
-    pub fn flex_leader(&self, g: u32) -> u32 {
-        g - g % self.groups_per_flex
-    }
-
     /// s_overhead_clusters: all blocks that can never hold file or
     /// directory data (DESIGN.md §17; verified against mke2fs).
     pub fn overhead(&self) -> u64 {

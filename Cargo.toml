@@ -8,7 +8,10 @@ description = "Deterministic, streaming, pure-Rust ext4 image builder with a ver
 repository = "https://github.com/cortexapps/mkext4"
 keywords = ["ext4", "filesystem", "mkfs", "deterministic", "reproducible"]
 categories = ["filesystem"]
-exclude = ["/build", "/tools", "/testdata", "/.github"]
+# testdata/ and tools/ ship in the package so `cargo test` works from
+# the published tarball (the unit tests read testdata/vectors/, the
+# differential tests invoke tools/mkrefs.sh).
+exclude = ["/build", "/.github"]
 
 [dependencies]
 # Hardware-accelerated CRC32C (SSE4.2 / ARMv8 CRC); wrapped by src/csum.rs

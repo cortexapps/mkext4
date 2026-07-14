@@ -1,8 +1,52 @@
 //! Deterministic, streaming, pure-Rust ext4 image builder — plus a
 //! verification-grade reader.
 //!
-//! See `DESIGN.md` in the repository for the on-disk layout decisions, the
-//! determinism contract, and the metadata-before-data emission argument.
+//! Identical builder calls with identical [`Options`] produce
+//! byte-identical images: UUID, htree hash seed, and every timestamp are
+//! explicit inputs, and the crate never consults a clock or RNG. Output
+//! streams through a [`RegionSink`]: every byte of the image is emitted
+//! exactly once and is final — all metadata immediately at
+//! [`Layout::writer`], file data behind it at ascending offsets.
+//!
+//! # Example
+//!
+//! Build a small image in memory, then read it back:
+//!
+//! ```
+//! use mkext4::sink::VecSink;
+//! use mkext4::{Features, FsBuilder, InodeCount, Meta, Options, ROOT};
+//!
+//! # fn main() -> mkext4::Result<()> {
+//! let epoch = 1_704_067_200;
+//! let mut b = FsBuilder::new(Options {
+//!     size_bytes: 16 << 20,
+//!     fs_uuid: [0x42; 16],
+//!     hash_seed: [1, 2, 3, 4],
+//!     epoch,
+//!     inodes: InodeCount::Auto,
+//!     label: Some("demo".into()),
+//!     reserved_percent: 5,
+//!     journal_blocks: None,
+//!     features: Features::LINUX_ROOTFS,
+//! })?;
+//! let etc = b.mkdir(ROOT, "etc", Meta::new(0o755, 0, 0, (epoch, 0)))?;
+//! let f = b.file(etc, "hostname", Meta::new(0o644, 0, 0, (epoch, 0)), 5)?;
+//!
+//! let layout = b.seal()?; // the complete physical layout is frozen here
+//! let mut sink = VecSink::default();
+//! let mut w = layout.writer(&mut sink)?;
+//! w.fill(f, &mut &b"husky"[..])?;
+//! w.finish()?;
+//!
+//! // sink.buf now holds a complete ext4 image (e2fsck-clean, mountable).
+//! let fs = mkext4::reader::Fs::open(&sink.buf[..])?;
+//! assert_eq!(fs.read_file(fs.resolve("/etc/hostname")?)?, b"husky");
+//! # Ok(()) }
+//! ```
+//!
+//! See [DESIGN.md](https://github.com/cortexapps/mkext4/blob/main/DESIGN.md)
+//! for the on-disk layout decisions, the determinism contract, and the
+//! metadata-before-data emission argument.
 //!
 //! Layer map (bottom-up):
 //! - [`csum`] / [`dirhash`] — ext4's crc32c conventions and the half_md4
@@ -18,10 +62,11 @@
 pub mod build;
 pub mod csum;
 pub mod dirhash;
-pub mod layout;
 pub mod reader;
 pub mod sink;
 pub mod spec;
+
+pub(crate) mod layout;
 
 pub use build::{
     Features, FsBuilder, InodeCount, InodeHandle, Layout, Meta, Options, SparseSeg, SpecialKind,
@@ -33,6 +78,7 @@ mod le;
 
 /// Errors produced by this crate.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Underlying I/O failure from a source or sink.
     Io(std::io::Error),
@@ -45,6 +91,9 @@ pub enum Error {
     },
     /// Structurally valid, but uses a feature this crate does not handle.
     Unsupported(String),
+    /// Invalid input to the builder/writer API (bad name, bad handle,
+    /// capacity exceeded, protocol misuse like double-fill).
+    Invalid(String),
 }
 
 impl std::fmt::Display for Error {
@@ -53,6 +102,7 @@ impl std::fmt::Display for Error {
             Error::Io(e) => write!(f, "i/o error: {e}"),
             Error::Corrupt { what, why } => write!(f, "corrupt {what}: {why}"),
             Error::Unsupported(what) => write!(f, "unsupported: {what}"),
+            Error::Invalid(what) => write!(f, "invalid: {what}"),
         }
     }
 }

@@ -112,6 +112,9 @@ fn parse_entries(
 impl DxRootView {
     /// Parse directory block 0 of a hash-indexed directory.
     pub fn parse(block: &[u8]) -> Result<DxRootView> {
+        if block.len() < 0x30 {
+            return Err(corrupt("dx_root", "short buffer"));
+        }
         // dot / dotdot sanity: real dirents at 0x00 and 0x0C with names
         // "." and ".." (".."'s rec_len stretches to the tail).
         if le32(block, 0) == 0 || &block[8..9] != b"." {
@@ -155,6 +158,9 @@ impl DxRootView {
 impl DxNodeView {
     /// Parse a dx_node (interior) block.
     pub fn parse(block: &[u8]) -> Result<DxNodeView> {
+        if block.len() < 0x18 {
+            return Err(corrupt("dx_node", "short buffer"));
+        }
         if le32(block, 0) != 0 || usize::from(le16(block, 4)) != block.len() {
             return Err(corrupt("dx_node", "fake dirent header mismatch"));
         }

@@ -14,22 +14,8 @@ use std::sync::OnceLock;
 use mkext4::reader::Fs;
 use mkext4::spec::{self, inode::FileType};
 
-fn e2fsprogs_sbin() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("E2FSPROGS_SBIN") {
-        return Some(PathBuf::from(p));
-    }
-    for cand in [
-        "/opt/homebrew/opt/e2fsprogs/sbin",
-        "/usr/local/opt/e2fsprogs/sbin",
-    ] {
-        if Path::new(cand).join("mke2fs").exists() {
-            return Some(PathBuf::from(cand));
-        }
-    }
-    // PATH lookup.
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find(|dir| dir.join("mke2fs").exists())
-}
+mod common;
+use common::e2fsprogs_sbin;
 
 /// Generate the reference matrix once per test process. Returns the
 /// output dir, or None when e2fsprogs is unavailable.

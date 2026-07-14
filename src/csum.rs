@@ -77,17 +77,24 @@ pub fn inode_bitmap(fs_seed: u32, bitmap_block: &[u8], inodes_per_group: u32) ->
 /// Returns the full 32-bit value; the caller stores the low 16 bits at
 /// 0x7C and, when the extra area exists, the high 16 bits at 0x82.
 pub fn inode(fs_seed: u32, ino: u32, generation: u32, inode: &[u8]) -> u32 {
-    let extra_isize = u16::from_le_bytes([inode[0x80], inode[0x81]]);
-    let has_hi = extra_isize >= 4;
+    // 128-byte (rev-1 minimal) inodes have no extra area at all.
+    let extra_isize = if inode.len() >= 0x82 {
+        u16::from_le_bytes([inode[0x80], inode[0x81]])
+    } else {
+        0
+    };
+    let has_hi = extra_isize >= 4 && inode.len() >= 0x84;
     let c = inode_seed(fs_seed, ino, generation);
     let c = crc32c_raw(c, &inode[..0x7C]);
     let c = crc32c_raw(c, &[0u8; 2]); // l_i_checksum_lo
-    let c = crc32c_raw(c, &inode[0x7E..0x82]);
+    let c = crc32c_raw(c, &inode[0x7E..inode.len().min(0x82)]);
     if has_hi {
         let c = crc32c_raw(c, &[0u8; 2]); // i_checksum_hi
         crc32c_raw(c, &inode[0x84..])
-    } else {
+    } else if inode.len() > 0x82 {
         crc32c_raw(c, &inode[0x82..])
+    } else {
+        c
     }
 }
 
@@ -236,11 +243,7 @@ mod tests {
             ("inode_2_root.bin", 2),
             ("inode_8_journal.bin", 8),
             ("inode_11_lost_found.bin", 11),
-            ("inode_sym_59.bin", 0), // ino read from manifest? see below
         ] {
-            if ino == 0 {
-                continue; // path-based inodes covered by reader tests
-            }
             let raw = vector(name);
             let gen = le32(&raw, 0x64);
             let got = inode(seed, ino, gen, &raw);

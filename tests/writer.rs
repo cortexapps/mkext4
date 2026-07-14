@@ -2,19 +2,18 @@
 //! reader round-trips it with zero verify() issues, the sink contract
 //! holds exactly, and the output is byte-deterministic (and sensitive).
 
-use std::io::Read;
-use std::path::{Path, PathBuf};
-
 use mkext4::reader::Fs;
 use mkext4::sink::{CheckingSink, VecSink};
 use mkext4::spec;
 use mkext4::{Features, FsBuilder, InodeCount, Meta, Options, SparseSeg, ROOT};
 
+mod common;
+use common::{pattern_at, pattern_bytes, Pattern, EPOCH};
+
 const UUID: [u8; 16] = [
     0xd0, 0xd0, 0xca, 0xca, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
 ];
 const SEED: [u32; 4] = [0xefbe_adde, 0xad4e_adde, 0xadde_ad8e, 0x0000_efbe];
-const EPOCH: i64 = 1_704_067_200;
 
 fn options(size: u64) -> Options {
     Options {
@@ -32,42 +31,6 @@ fn options(size: u64) -> Options {
 
 fn meta(mode: u16) -> Meta {
     Meta::new(mode, 0, 0, (EPOCH, 0))
-}
-
-/// Deterministic pattern source.
-struct Pattern {
-    remaining: u64,
-    counter: u64,
-}
-
-impl Pattern {
-    fn new(len: u64, seed: u64) -> Pattern {
-        Pattern {
-            remaining: len,
-            counter: seed,
-        }
-    }
-}
-
-impl Read for Pattern {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = (self.remaining).min(buf.len() as u64) as usize;
-        for b in &mut buf[..n] {
-            self.counter = self
-                .counter
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1);
-            *b = (self.counter >> 33) as u8;
-        }
-        self.remaining -= n as u64;
-        Ok(n)
-    }
-}
-
-fn pattern_bytes(len: u64, seed: u64) -> Vec<u8> {
-    let mut v = Vec::new();
-    Pattern::new(len, seed).read_to_end(&mut v).unwrap();
-    v
 }
 
 /// Build a representative namespace and return the image bytes.
@@ -113,51 +76,16 @@ fn build_basic(size: u64, mtime_tweak: i64) -> Vec<u8> {
     inner.buf.clone()
 }
 
-fn e2fsprogs_sbin() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("E2FSPROGS_SBIN") {
-        return Some(PathBuf::from(p));
-    }
-    for cand in [
-        "/opt/homebrew/opt/e2fsprogs/sbin",
-        "/usr/local/opt/e2fsprogs/sbin",
-    ] {
-        if Path::new(cand).join("e2fsck").exists() {
-            return Some(PathBuf::from(cand));
-        }
-    }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find(|dir| dir.join("e2fsck").exists())
-}
-
-/// `e2fsck -fn` must exit 0 with no complaints.
-fn assert_fsck_clean(image: &[u8], tag: &str) {
-    let Some(sbin) = e2fsprogs_sbin() else {
-        eprintln!("SKIP fsck gate: e2fsprogs not found");
-        return;
-    };
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    std::fs::create_dir_all(&dir).unwrap();
-    let img = dir.join(format!("{tag}.img"));
-    std::fs::write(&img, image).unwrap();
-    let out = std::process::Command::new(sbin.join("e2fsck"))
-        .arg("-fn")
-        .arg(&img)
-        .output()
-        .expect("running e2fsck");
-    assert!(
-        out.status.success(),
-        "{tag}: e2fsck -fn failed:\n{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
 #[test]
 fn basic_image_fsck_clean_and_readable() {
     let size = 64 << 20; // 16384 blocks
     let image = build_basic(size, 0);
     assert_eq!(image.len() as u64, size);
-    assert_fsck_clean(&image, "writer_basic");
+    common::assert_fsck_clean(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &image,
+        "writer_basic",
+    );
 
     let fs = Fs::open(&image[..]).expect("reader opens our image");
     let issues = fs.verify().expect("verify runs");
@@ -230,7 +158,11 @@ fn empty_namespace_image() {
     let w = layout.writer(&mut sink).unwrap();
     w.finish().unwrap();
     let image = sink.finish(size).unwrap().buf.clone();
-    assert_fsck_clean(&image, "writer_empty");
+    common::assert_fsck_clean(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &image,
+        "writer_empty",
+    );
     let fs = Fs::open(&image[..]).unwrap();
     assert!(fs.verify().unwrap().is_empty());
     assert_eq!(fs.resolve("/lost+found").unwrap(), 11);
@@ -251,7 +183,11 @@ fn odd_geometry_multiple_groups() {
     w.fill(f, &mut Pattern::new(300 << 20, 9)).unwrap();
     w.finish().unwrap();
     let image = sink.finish(size).unwrap().buf.clone();
-    assert_fsck_clean(&image, "writer_span");
+    common::assert_fsck_clean(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &image,
+        "writer_span",
+    );
     let fs = Fs::open(&image[..]).unwrap();
     assert!(fs.verify().unwrap().is_empty());
     let ino = fs.resolve("/spanner").unwrap();
@@ -287,7 +223,11 @@ fn extent_tree_depth_one() {
     w.fill(f, &mut Pattern::new(len, 11)).unwrap();
     w.finish().unwrap();
     let image = sink.finish(size).unwrap().buf.clone();
-    assert_fsck_clean(&image, "writer_tree");
+    common::assert_fsck_clean(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &image,
+        "writer_tree",
+    );
     let fs = Fs::open(&image[..]).unwrap();
     assert!(fs.verify().unwrap().is_empty());
     let ino = fs.resolve("/huge").unwrap();
@@ -304,22 +244,6 @@ fn extent_tree_depth_one() {
         let want = pattern_at(len, 11, probe, got.len());
         assert_eq!(got, want, "content at {probe}");
     }
-}
-
-/// Recompute `len` bytes of the pattern at an offset without holding the
-/// whole stream.
-fn pattern_at(total: u64, seed: u64, offset: u64, len: usize) -> Vec<u8> {
-    let mut p = Pattern::new(total, seed);
-    let mut skip = vec![0u8; 1 << 20];
-    let mut remaining = offset;
-    while remaining > 0 {
-        let n = remaining.min(skip.len() as u64) as usize;
-        p.read_exact(&mut skip[..n]).unwrap();
-        remaining -= n as u64;
-    }
-    let mut out = vec![0u8; len];
-    p.read_exact(&mut out).unwrap();
-    out
 }
 
 #[test]
@@ -397,7 +321,11 @@ fn full_feature_namespace() {
     };
     let image = build();
     assert_eq!(build(), image, "full-feature build must be deterministic");
-    assert_fsck_clean(&image, "writer_features");
+    common::assert_fsck_clean(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &image,
+        "writer_features",
+    );
 
     let fs = Fs::open(&image[..]).unwrap();
     let issues = fs.verify().unwrap();
@@ -506,7 +434,11 @@ fn htree_threshold_matches_oracle_rule() {
         let mut sink = VecSink::default();
         layout.writer(&mut sink).unwrap().finish().unwrap();
         let image = sink.buf;
-        assert_fsck_clean(&image, &format!("writer_thresh_{count}"));
+        common::assert_fsck_clean(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            &image,
+            &format!("writer_thresh_{count}"),
+        );
         let fs = Fs::open(&image[..]).unwrap();
         assert!(fs.verify().unwrap().is_empty(), "{count} entries");
         let inode = fs.inode(fs.resolve("/d").unwrap()).unwrap();
@@ -534,7 +466,11 @@ fn two_level_htree() {
     let mut sink = VecSink::default();
     layout.writer(&mut sink).unwrap().finish().unwrap();
     let image = sink.buf;
-    assert_fsck_clean(&image, "writer_htree2");
+    common::assert_fsck_clean(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &image,
+        "writer_htree2",
+    );
     let fs = Fs::open(&image[..]).unwrap();
     // verify() re-hashes every one of the 140k names into its dx range.
     let issues = fs.verify().unwrap();

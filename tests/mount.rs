@@ -8,7 +8,6 @@
 
 #![cfg(target_os = "linux")]
 
-use std::io::Read;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
@@ -16,46 +15,11 @@ use std::process::Command;
 use mkext4::sink::FileSink;
 use mkext4::{Features, FsBuilder, InodeCount, Meta, Options, SparseSeg, SpecialKind, ROOT};
 
-const EPOCH: i64 = 1_704_067_200;
+mod common;
+use common::{pattern_bytes, Pattern, EPOCH};
 
 fn meta(mode: u16, uid: u32, gid: u32) -> Meta {
     Meta::new(mode, uid, gid, (EPOCH, 123_456_789))
-}
-
-/// Deterministic pattern source (same generator as tests/writer.rs).
-struct Pattern {
-    remaining: u64,
-    counter: u64,
-}
-
-impl Pattern {
-    fn new(len: u64, seed: u64) -> Pattern {
-        Pattern {
-            remaining: len,
-            counter: seed,
-        }
-    }
-}
-
-impl Read for Pattern {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = (self.remaining).min(buf.len() as u64) as usize;
-        for b in &mut buf[..n] {
-            self.counter = self
-                .counter
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1);
-            *b = (self.counter >> 33) as u8;
-        }
-        self.remaining -= n as u64;
-        Ok(n)
-    }
-}
-
-fn pattern_bytes(len: u64, seed: u64) -> Vec<u8> {
-    let mut v = Vec::new();
-    Pattern::new(len, seed).read_to_end(&mut v).unwrap();
-    v
 }
 
 fn sh(cmd: &str) -> Result<String, String> {

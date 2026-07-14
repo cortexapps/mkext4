@@ -4,5 +4,4 @@
 pub mod alloc;
 pub mod geometry;
 
-pub use alloc::Allocator;
 pub use geometry::Geometry;

@@ -23,9 +23,8 @@ pub(crate) fn needs_htree(entries: &[Entry]) -> bool {
     bytes >= BLOCK_SIZE - 24
 }
 
-/// Rendered htree directory: `blocks[k]` is logical block k, fully
-/// checksummed except that the caller must know the inode number —
-/// so build() takes it up front.
+/// Rendered htree directory: `blocks[k]` is logical block k (dx_root,
+/// then leaves, then dx_nodes), each fully checksummed.
 pub(crate) struct HtreeDir {
     pub(crate) blocks: Vec<Vec<u8>>,
 }
@@ -68,14 +67,16 @@ pub(crate) fn build(
     // dx entries for the leaf level: (hash-with-collision-bit, logical).
     let mut leaf_dx: Vec<(u32, u32)> = Vec::with_capacity(leaves.len());
     let mut prev_last_hash: Option<u32> = None;
+    let mut base = 0usize; // index into `hashed` of the leaf's first entry
     for (k, leaf) in leaves.iter().enumerate() {
-        let first_hash = hashed[leaf_position(&leaves, k)].0;
+        let first_hash = hashed[base].0;
         let hash = match prev_last_hash {
             Some(p) if k > 0 && p == first_hash => first_hash | 1,
             _ => first_hash,
         };
         leaf_dx.push((hash, (k + 1) as u32));
-        prev_last_hash = Some(hashed[leaf_position(&leaves, k) + leaf.len() - 1].0);
+        prev_last_hash = Some(hashed[base + leaf.len() - 1].0);
+        base += leaf.len();
     }
 
     // Level structure.
@@ -195,9 +196,4 @@ fn write_countlimit_entries(buf: &mut [u8], count_offset: usize, limit: usize, d
         crate::le::put_u32(buf, count_offset + 8 * i, hash);
         crate::le::put_u32(buf, count_offset + 8 * i + 4, block);
     }
-}
-
-/// Index into `hashed` of the first entry of leaf `k`.
-fn leaf_position(leaves: &[Vec<usize>], k: usize) -> usize {
-    leaves[..k].iter().map(|l| l.len()).sum()
 }

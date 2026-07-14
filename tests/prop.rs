@@ -5,14 +5,14 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
 
 use mkext4::reader::Fs;
 use mkext4::sink::{CheckingSink, VecSink};
 use mkext4::{Features, FsBuilder, InodeCount, InodeHandle, Meta, Options, SparseSeg, ROOT};
 use proptest::prelude::*;
 
-const EPOCH: i64 = 1_704_067_200;
+mod common;
+use common::{Pattern, EPOCH};
 
 /// One declared entry in a generated directory.
 #[derive(Debug, Clone)]
@@ -199,52 +199,6 @@ impl Builder {
     }
 }
 
-/// Deterministic pattern source (same generator as tests/writer.rs).
-struct Pattern {
-    remaining: u64,
-    counter: u64,
-}
-
-impl Pattern {
-    fn new(len: u64, seed: u64) -> Pattern {
-        Pattern {
-            remaining: len,
-            counter: seed,
-        }
-    }
-}
-
-impl Read for Pattern {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = (self.remaining).min(buf.len() as u64) as usize;
-        for b in &mut buf[..n] {
-            self.counter = self
-                .counter
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1);
-            *b = (self.counter >> 33) as u8;
-        }
-        self.remaining -= n as u64;
-        Ok(n)
-    }
-}
-
-fn e2fsprogs_sbin() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("E2FSPROGS_SBIN") {
-        return Some(PathBuf::from(p));
-    }
-    for cand in [
-        "/opt/homebrew/opt/e2fsprogs/sbin",
-        "/usr/local/opt/e2fsprogs/sbin",
-    ] {
-        if Path::new(cand).join("e2fsck").exists() {
-            return Some(PathBuf::from(cand));
-        }
-    }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find(|dir| dir.join("e2fsck").exists())
-}
-
 fn check_namespace(entries: Vec<(String, GenNode)>) {
     let size = 2u64 << 30;
     let b = FsBuilder::new(Options {
@@ -282,23 +236,11 @@ fn check_namespace(entries: Vec<(String, GenNode)>) {
     let image = sink.finish(size).unwrap().buf.clone();
 
     // Oracle 1: e2fsck.
-    if let Some(sbin) = e2fsprogs_sbin() {
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let img = dir.join(format!("prop_{}.img", std::process::id()));
-        std::fs::write(&img, &image).unwrap();
-        let out = std::process::Command::new(sbin.join("e2fsck"))
-            .arg("-fn")
-            .arg(&img)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "e2fsck: {}",
-            String::from_utf8_lossy(&out.stdout)
-        );
-        let _ = std::fs::remove_file(&img);
-    }
+    common::assert_fsck_clean(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &image,
+        &format!("prop_{}", std::process::id()),
+    );
 
     // Oracle 2: our reader, structurally verified, then model round-trip.
     let fs = Fs::open(&image[..]).unwrap();

@@ -3,7 +3,7 @@
 //! file contents; `finish` enforces completeness.
 
 use super::seal::{Layout, SegSrc};
-use super::{InodeHandle, NodeKind};
+use super::InodeHandle;
 use crate::sink::RegionSink;
 use crate::spec::BLOCK_SIZE;
 use crate::{Error, Result};
@@ -33,6 +33,9 @@ pub struct ImageWriter<'a, S: RegionSink> {
     pending: usize,
     data_bytes: u64,
     poisoned: bool,
+    /// Reused across fills (256 KiB; one allocation per writer, not per
+    /// file — this matters at node_modules scale).
+    scratch: Vec<u8>,
 }
 
 impl<'a, S: RegionSink> ImageWriter<'a, S> {
@@ -61,12 +64,13 @@ impl<'a, S: RegionSink> ImageWriter<'a, S> {
             pending,
             data_bytes: 0,
             poisoned: false,
+            scratch: vec![0u8; 64 * BLOCK_SIZE],
         })
     }
 
     fn check_poisoned(&self) -> Result<()> {
         if self.poisoned {
-            return Err(Error::Unsupported(
+            return Err(Error::Invalid(
                 "writer is poisoned by an earlier failed fill; rebuild from the layout".into(),
             ));
         }
@@ -81,9 +85,9 @@ impl<'a, S: RegionSink> ImageWriter<'a, S> {
         let slot = f.0 as usize;
         match self.fill_state.get(slot) {
             Some(FillState::Pending) => {}
-            Some(FillState::Done) => return Err(Error::Unsupported("file already filled".into())),
+            Some(FillState::Done) => return Err(Error::Invalid("file already filled".into())),
             _ => {
-                return Err(Error::Unsupported(
+                return Err(Error::Invalid(
                     "handle is not a fillable file in this layout".into(),
                 ))
             }
@@ -104,7 +108,7 @@ impl<'a, S: RegionSink> ImageWriter<'a, S> {
     fn fill_inner(&mut self, slot: usize, reader: &mut impl Read) -> Result<()> {
         let (runs, size) = &self.layout.file_runs[slot];
         let mut remaining = *size;
-        let mut buf = vec![0u8; 64 * BLOCK_SIZE];
+        let buf = &mut self.scratch;
         for run in runs {
             let mut offset = run.start * BLOCK_SIZE as u64;
             let mut run_bytes = (run.len * BLOCK_SIZE as u64).min(remaining);
@@ -134,7 +138,7 @@ impl<'a, S: RegionSink> ImageWriter<'a, S> {
     pub fn finish(self) -> Result<Summary> {
         self.check_poisoned()?;
         if self.pending > 0 {
-            return Err(Error::Unsupported(format!(
+            return Err(Error::Invalid(format!(
                 "{} declared file(s) never filled",
                 self.pending
             )));
@@ -246,7 +250,3 @@ fn emit_itable<S: RegionSink>(
     }
     Ok(())
 }
-
-// NodeKind is only referenced for documentation purposes here.
-#[allow(unused_imports)]
-use NodeKind as _;

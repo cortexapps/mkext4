@@ -38,7 +38,7 @@ pub(crate) fn plan(mut attrs: Vec<Attr>) -> Result<XattrPlan> {
     attrs.sort_by(|a, b| (a.0, a.1.len(), &a.1).cmp(&(b.0, b.1.len(), &b.1)));
     for a in &attrs {
         if a.2.len() > BLOCK_SIZE - 32 - 4 - entry_bytes(a) {
-            return Err(Error::Unsupported(format!(
+            return Err(Error::Invalid(format!(
                 "xattr value of {} bytes cannot fit an xattr block",
                 a.2.len()
             )));
@@ -66,7 +66,7 @@ pub(crate) fn plan(mut attrs: Vec<Attr>) -> Result<XattrPlan> {
         total_block += entry_bytes(a) + value_bytes(a);
     }
     if total_block > BLOCK_SIZE {
-        return Err(Error::Unsupported(
+        return Err(Error::Invalid(
             "xattrs exceed the in-inode area plus one block".into(),
         ));
     }
@@ -97,12 +97,12 @@ pub(crate) fn render_block(attrs: &[Attr], fs_seed: u32, block_nr: u64) -> Vec<u
     buf
 }
 
-/// Write entries at the start of `region` and values from its end,
-/// in order. `value_offs` values are relative to `region` start minus
-/// nothing for ibody (IFIRST-relative) — for blocks the caller passes
-/// the region at 0x20 but offsets must be block-relative, hence
-/// `offs_base`. Returns per-entry hashes (0 for ibody: pass offs_base 0
-/// and ignore).
+/// Write entries at the start of `region` and values downward from its
+/// end. Stored `e_value_offs` = `offs_base` + offset-within-region: pass
+/// 0 for the in-inode area (offsets are IFIRST-relative there) and 0x20
+/// for a block (offsets are block-relative, region starts after the
+/// header). `offs_base != 0` also selects block semantics: real e_hash
+/// values (in-inode entries store 0). Returns the per-entry hashes.
 fn render_entries(region: &mut [u8], attrs: &[Attr], usable: usize, offs_base: usize) -> Vec<u32> {
     let is_block = offs_base != 0;
     let mut ent = 0usize;

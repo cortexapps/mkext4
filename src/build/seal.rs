@@ -64,11 +64,22 @@ pub struct Layout {
     /// All file-data runs, sorted by block (gap-skip list for emission).
     pub(crate) data_runs: Vec<Run>,
     /// ino -> rendered 256-byte inode (only for inodes that exist).
-    /// NOTE: fine for phase 3; the 1M-inode memory budget wants this
-    /// replaced by render-on-demand before the benchmarks land.
+    /// Known memory hot spot: ~256 B per inode retained until the writer
+    /// finishes. Fine at rootfs scale; render-on-demand is the planned
+    /// fix for multi-million-inode namespaces.
     pub(crate) inodes: std::collections::BTreeMap<u32, [u8; 256]>,
     /// Highest used inode number.
     pub(crate) max_ino: u32,
+}
+
+impl std::fmt::Debug for Layout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Layout")
+            .field("image_len", &self.image_len())
+            .field("inodes", &self.max_ino)
+            .field("segments", &self.segments.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Layout {
@@ -80,7 +91,9 @@ impl Layout {
     /// The final (offset, length-in-bytes) data ranges of a declared
     /// file, in logical order.
     pub fn extents(&self, f: InodeHandle) -> Vec<(u64, u64)> {
-        let (runs, size) = &self.file_runs[f.0 as usize];
+        let Some((runs, size)) = self.file_runs.get(f.0 as usize) else {
+            return Vec::new();
+        };
         let mut remaining = *size;
         let mut out = Vec::with_capacity(runs.len());
         for r in runs {
@@ -181,7 +194,7 @@ fn plan_extents(
     let seed = csum::inode_seed(fs_seed, ino, 0);
     let leaf_blocks = alloc
         .take(n_leaves as u64, 1)
-        .ok_or_else(|| Error::Unsupported("image full (extent tree)".into()))?;
+        .ok_or_else(|| Error::Invalid("image full (extent tree)".into()))?;
     let mut level1: Vec<(u32, u64)> = Vec::with_capacity(n_leaves); // (first logical, block)
     for (li, chunk) in plan.extents.chunks(per_leaf).enumerate() {
         let block = leaf_blocks[li].start;
@@ -217,7 +230,7 @@ fn plan_extents(
         }
         let idx_blocks = alloc
             .take(n_idx as u64, 1)
-            .ok_or_else(|| Error::Unsupported("image full (extent tree)".into()))?;
+            .ok_or_else(|| Error::Invalid("image full (extent tree)".into()))?;
         let mut level2 = Vec::with_capacity(n_idx);
         for (ii, chunk) in level1.chunks(per_leaf).enumerate() {
             let block = idx_blocks[ii].start;
@@ -266,15 +279,15 @@ fn plan_extents(
     Ok(plan)
 }
 
-/// Pack dirents into blocks. Returns rendered blocks WITHOUT checksums
-/// (the caller adds tails once the inode number is known).
-fn pack_dirents(entries: &[(Vec<u8>, u32, u8)], self_ino_placeholder: bool) -> Vec<Vec<u8>> {
+/// Pack dirents into blocks: records in declaration order, the last
+/// record of each block stretched to the checksum tail, whose shape is
+/// written here but whose checksum the caller fills in.
+fn pack_dirents(entries: &[(Vec<u8>, u32, u8)]) -> Vec<Vec<u8>> {
     // entries: (name, ino, file_type); "." and ".." are synthesized by
     // the caller as the first two entries of the slice.
     let usable = BLOCK_SIZE - 12; // checksum tail
     let mut blocks: Vec<Vec<(usize, usize)>> = vec![Vec::new()]; // (entry idx, rec_len)
     let mut used = 0usize;
-    let _ = self_ino_placeholder;
     for (i, (name, _, _)) in entries.iter().enumerate() {
         let rl = dirent::rec_len_for(name.len());
         if used + rl > usable {
@@ -436,7 +449,7 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
     };
     let geo = Geometry::new(b.opts.size_bytes, total_inodes, b.opts.journal_blocks)?;
     if geo.inodes_count() < used_inodes {
-        return Err(Error::Unsupported(format!(
+        return Err(Error::Invalid(format!(
             "{used_inodes} inodes needed but geometry provides {}",
             geo.inodes_count()
         )));
@@ -483,7 +496,7 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
                 // Jump past the interruption and retry once.
                 let runs = cur.take(itb, u64::MAX).ok_or_else(err_full)?;
                 if runs.len() != 1 {
-                    return Err(Error::Unsupported(
+                    return Err(Error::Invalid(
                         "cannot place a contiguous inode table".into(),
                     ));
                 }
@@ -523,8 +536,14 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
 
     // --- namespace metadata: per inode, in inode order ----------------------
     // For each inode: xattr block, then directory / slow-symlink content.
-    // (slot, runs, plan, nblocks, is_htree)
-    let mut dir_blocks: Vec<(u32, Vec<Run>, ExtentPlan, u64, bool)> = Vec::new();
+    struct DirPlan {
+        slot: u32,
+        runs: Vec<Run>,
+        plan: ExtentPlan,
+        nblocks: u64,
+        is_htree: bool,
+    }
+    let mut dir_blocks: Vec<DirPlan> = Vec::new();
     let mut dir_rendered: Vec<(u64, Vec<u8>)> = Vec::new(); // (block, bytes)
                                                             // Per slot: (i_file_acl block or 0, rendered ibody area).
     let mut xattr_out: Vec<(u64, Vec<u8>)> = vec![(0, Vec::new()); b.nodes.len()];
@@ -547,9 +566,9 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
             (b".".to_vec(), LOST_FOUND_INO, file_type::DIR),
             (b"..".to_vec(), ROOT_INO, file_type::DIR),
         ];
-        let mut blocks = pack_dirents(&entries, false);
+        let mut blocks = pack_dirents(&entries);
         while blocks.len() < LOST_FOUND_BLOCKS as usize {
-            blocks.extend(pack_dirents(&[], false)); // empty block
+            blocks.extend(pack_dirents(&[])); // empty block
         }
         let seed = csum::inode_seed(fs_seed, LOST_FOUND_INO, 0);
         let mut phys = expand_runs(&lf_runs);
@@ -560,6 +579,7 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
         }
     }
 
+    let parents = parent_map(&b, &slot_ino);
     for slot in 0..b.nodes.len() as u32 {
         let ino = slot_ino[slot as usize];
         if ino == 0 {
@@ -588,7 +608,7 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
                 let parent_ino = if slot == 0 {
                     ROOT_INO
                 } else {
-                    find_parent(&b, slot, &slot_ino)
+                    parents[slot as usize]
                 };
                 let mut entries: Vec<(Vec<u8>, u32, u8)> = Vec::with_capacity(children.len() + 1);
                 if slot == 0 {
@@ -618,7 +638,7 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
                     with_dots.push((b".".to_vec(), ino, file_type::DIR));
                     with_dots.push((b"..".to_vec(), parent_ino, file_type::DIR));
                     with_dots.extend(entries);
-                    let mut blocks = pack_dirents(&with_dots, false);
+                    let mut blocks = pack_dirents(&with_dots);
                     let seed = csum::inode_seed(fs_seed, ino, 0);
                     for buf in &mut blocks {
                         let c = csum::dirent_block(seed, buf);
@@ -640,7 +660,13 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
                 for (buf, p) in blocks.into_iter().zip(phys.drain(..)) {
                     dir_rendered.push((p, buf));
                 }
-                dir_blocks.push((slot, runs, plan, nblocks, is_htree));
+                dir_blocks.push(DirPlan {
+                    slot,
+                    runs,
+                    plan,
+                    nblocks,
+                    is_htree,
+                });
             }
             NodeKind::Symlink { target } if target.len() > 59 => {
                 let block = alloc.take_one().ok_or_else(err_full)?;
@@ -729,8 +755,8 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
     for r in &lf_runs {
         mark(r.start, r.len);
     }
-    for (_, runs, ..) in &dir_blocks {
-        for r in runs {
+    for d in &dir_blocks {
+        for r in &d.runs {
             mark(r.start, r.len);
         }
     }
@@ -811,13 +837,12 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
     }
 
     // Directories: htree dirs get INDEX_FL.
-    for (slot, runs, plan, nblocks, is_htree) in &dir_blocks {
-        let slot = *slot as usize;
+    for d in &dir_blocks {
+        let slot = d.slot as usize;
         let ino = slot_ino[slot];
         let extra_root_link = if slot == 0 { 1 } else { 0 }; // lost+found's ".."
-        let _ = runs;
-        let (file_acl, ibody) = xattr_out[slot].clone();
-        let flags = iflags::EXTENTS | if *is_htree { iflags::INDEX } else { 0 };
+        let (file_acl, ibody) = std::mem::take(&mut xattr_out[slot]);
+        let flags = iflags::EXTENTS | if d.is_htree { iflags::INDEX } else { 0 };
         inodes.insert(
             ino,
             render_inode(
@@ -826,11 +851,13 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
                 &InodeRender {
                     meta: b.nodes[slot].meta,
                     ftype: file_type::DIR,
-                    size: nblocks * BLOCK_SIZE as u64,
-                    blocks512: nblocks * 8 + plan.tree_blocks + if file_acl != 0 { 8 } else { 0 },
+                    size: d.nblocks * BLOCK_SIZE as u64,
+                    blocks512: d.nblocks * 8
+                        + d.plan.tree_blocks
+                        + if file_acl != 0 { 8 } else { 0 },
                     nlink: 2 + subdirs[slot] + extra_root_link,
                     flags,
-                    block: plan.root,
+                    block: d.plan.root,
                     file_acl,
                     ibody,
                 },
@@ -843,7 +870,7 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
         if ino == 0 {
             continue;
         }
-        let (file_acl, ibody) = xattr_out[slot].clone();
+        let (file_acl, ibody) = std::mem::take(&mut xattr_out[slot]);
         let acl_512 = if file_acl != 0 { 8 } else { 0 };
         let render = match &node.kind {
             NodeKind::Dir { .. } => continue, // handled above
@@ -915,6 +942,13 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
 
     // --- group descriptors -------------------------------------------------
     let ipg = geo.inodes_per_group;
+    // Directory count per group (bg_used_dirs_count), one pass.
+    let mut dir_count_per_group = vec![0u32; geo.groups as usize];
+    for (&ino, raw) in &inodes {
+        if crate::le::u16(raw, 0) >> 12 == 0o04 {
+            dir_count_per_group[((ino - 1) / ipg) as usize] += 1;
+        }
+    }
     let mut descs: Vec<GroupDesc> = Vec::with_capacity(geo.groups as usize);
     let mut total_free_blocks = 0u64;
     for g in 0..geo.groups {
@@ -951,15 +985,7 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
                 ib_block[i / 8] |= 1 << (i % 8);
             }
         }
-        let dirs_in_group = inodes
-            .keys()
-            .filter(|&&ino| {
-                (ino - 1) / ipg == g && {
-                    let raw = &inodes[&ino];
-                    crate::le::u16(raw, 0) >> 12 == 0o04
-                }
-            })
-            .count() as u32;
+        let dirs_in_group = dir_count_per_group[g as usize];
 
         let mut d = GroupDesc {
             block_bitmap: bb,
@@ -1171,7 +1197,7 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
 }
 
 fn err_full() -> Error {
-    Error::Unsupported("image size too small for the declared namespace".into())
+    Error::Invalid("image size too small for the declared namespace".into())
 }
 
 fn expand_runs(runs: &[Run]) -> Vec<u64> {
@@ -1197,16 +1223,21 @@ fn mark_reachable(b: &FsBuilder, slot: u32, seen: &mut [bool]) -> Result<()> {
     Ok(())
 }
 
-fn find_parent(b: &FsBuilder, slot: u32, slot_ino: &[u32]) -> u32 {
+/// slot -> parent inode number, one pass over every live child list
+/// (replaces a per-directory scan that was quadratic in namespace size).
+fn parent_map(b: &FsBuilder, slot_ino: &[u32]) -> Vec<u32> {
+    let mut parents = vec![0u32; b.nodes.len()];
     for (p, node) in b.nodes.iter().enumerate() {
         if slot_ino[p] == 0 {
             continue;
         }
         if let NodeKind::Dir { children } = &node.kind {
-            if children.iter().any(|&(_, c, dead)| !dead && c == slot) {
-                return slot_ino[p];
+            for &(_, c, dead) in children {
+                if !dead {
+                    parents[c as usize] = slot_ino[p];
+                }
             }
         }
     }
-    0
+    parents
 }

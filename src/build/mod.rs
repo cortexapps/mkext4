@@ -186,6 +186,7 @@ pub(crate) struct Node {
 }
 
 /// Phase 1: namespace declaration.
+#[derive(Debug)]
 pub struct FsBuilder {
     pub(crate) opts: Options,
     pub(crate) nodes: Vec<Node>,
@@ -202,17 +203,24 @@ impl FsBuilder {
     /// Start declaring a namespace.
     pub fn new(opts: Options) -> Result<FsBuilder> {
         if opts.size_bytes == 0 || opts.size_bytes % 4096 != 0 {
-            return Err(Error::Unsupported(
+            return Err(Error::Invalid(
                 "size_bytes must be a positive multiple of 4096".into(),
             ));
         }
         if let Some(l) = &opts.label {
             if l.len() > 16 {
-                return Err(Error::Unsupported("label longer than 16 bytes".into()));
+                return Err(Error::Invalid("label longer than 16 bytes".into()));
             }
         }
         if opts.reserved_percent > 50 {
-            return Err(Error::Unsupported("reserved_percent > 50".into()));
+            return Err(Error::Invalid("reserved_percent > 50".into()));
+        }
+        // The superblock's own timestamps are plain 32-bit fields.
+        if opts.epoch < 0 || opts.epoch > i64::from(u32::MAX) {
+            return Err(Error::Invalid(format!(
+                "epoch {} outside the superblock's u32 range",
+                opts.epoch
+            )));
         }
         let root_meta = Meta::new(0o755, 0, 0, (opts.epoch, 0));
         Ok(FsBuilder {
@@ -233,16 +241,16 @@ impl FsBuilder {
     fn intern(&mut self, name: &str) -> Result<NameRef> {
         let bytes = name.as_bytes();
         if bytes.is_empty() || bytes.len() > 255 {
-            return Err(Error::Unsupported(format!(
+            return Err(Error::Invalid(format!(
                 "name length {} (must be 1..=255)",
                 bytes.len()
             )));
         }
         if bytes.contains(&b'/') || bytes.contains(&0) || name == "." || name == ".." {
-            return Err(Error::Unsupported(format!("invalid name {name:?}")));
+            return Err(Error::Invalid(format!("invalid name {name:?}")));
         }
         let off = u32::try_from(self.names.len())
-            .map_err(|_| Error::Unsupported("name arena overflow".into()))?;
+            .map_err(|_| Error::Invalid("name arena overflow".into()))?;
         self.names.extend_from_slice(bytes);
         Ok(NameRef {
             off,
@@ -257,18 +265,19 @@ impl FsBuilder {
     fn dir_children_mut(&mut self, dir: InodeHandle) -> Result<&mut Vec<(NameRef, u32, bool)>> {
         match self.nodes.get_mut(dir.0 as usize).map(|n| &mut n.kind) {
             Some(NodeKind::Dir { children }) => Ok(children),
-            Some(_) => Err(Error::Unsupported("parent is not a directory".into())),
-            None => Err(Error::Unsupported("invalid handle".into())),
+            Some(_) => Err(Error::Invalid("parent is not a directory".into())),
+            None => Err(Error::Invalid("invalid handle".into())),
         }
     }
 
     fn check_duplicate(&self, dir: InodeHandle, name: &str) -> Result<()> {
-        let NodeKind::Dir { children } = &self.nodes[dir.0 as usize].kind else {
-            return Err(Error::Unsupported("parent is not a directory".into()));
+        let Some(NodeKind::Dir { children }) = self.nodes.get(dir.0 as usize).map(|n| &n.kind)
+        else {
+            return Err(Error::Invalid("parent is not a directory".into()));
         };
         for (nref, _, dead) in children {
             if !dead && self.name(*nref) == name.as_bytes() {
-                return Err(Error::Unsupported(format!(
+                return Err(Error::Invalid(format!(
                     "duplicate name {name:?} (remove it first)"
                 )));
             }
@@ -335,10 +344,10 @@ impl FsBuilder {
                 SparseSeg::Hole(l) => l,
             };
             if len == 0 {
-                return Err(Error::Unsupported("zero-length sparse segment".into()));
+                return Err(Error::Invalid("zero-length sparse segment".into()));
             }
             if i + 1 != segments.len() && len % 4096 != 0 {
-                return Err(Error::Unsupported(
+                return Err(Error::Invalid(
                     "sparse segments must be block-aligned (except the last)".into(),
                 ));
             }
@@ -374,7 +383,7 @@ impl FsBuilder {
     ) -> Result<InodeHandle> {
         let t = target.as_bytes();
         if t.is_empty() || t.len() > 4095 || t.contains(&0) {
-            return Err(Error::Unsupported(format!(
+            return Err(Error::Invalid(format!(
                 "symlink target length {} (must be 1..=4095, no NUL)",
                 t.len()
             )));
@@ -404,7 +413,7 @@ impl FsBuilder {
             SpecialKind::Socket => (spec::file_type::SOCK, 0, 0),
         };
         if major > 0xFFF || minor > 0xF_FFFF {
-            return Err(Error::Unsupported(format!(
+            return Err(Error::Invalid(format!(
                 "device numbers ({major}, {minor}) out of dev_t range"
             )));
         }
@@ -428,7 +437,7 @@ impl FsBuilder {
     /// the value.
     pub fn set_xattr(&mut self, handle: InodeHandle, name: &str, value: &[u8]) -> Result<()> {
         if self.nodes.get(handle.0 as usize).is_none() {
-            return Err(Error::Unsupported("invalid handle".into()));
+            return Err(Error::Invalid("invalid handle".into()));
         }
         let (index, suffix): (u8, &str) = if let Some(s) = name.strip_prefix("user.") {
             (1, s)
@@ -443,12 +452,12 @@ impl FsBuilder {
         } else if let Some(s) = name.strip_prefix("system.") {
             (7, s)
         } else {
-            return Err(Error::Unsupported(format!(
+            return Err(Error::Invalid(format!(
                 "xattr name {name:?} has no recognized namespace"
             )));
         };
         if suffix.len() > 255 {
-            return Err(Error::Unsupported("xattr name too long".into()));
+            return Err(Error::Invalid("xattr name too long".into()));
         }
         let list = self.xattrs.entry(handle.0).or_default();
         if let Some(e) = list
@@ -466,13 +475,13 @@ impl FsBuilder {
     pub fn hardlink(&mut self, parent: InodeHandle, name: &str, target: InodeHandle) -> Result<()> {
         match self.nodes.get(target.0 as usize).map(|n| &n.kind) {
             Some(NodeKind::Dir { .. }) => {
-                return Err(Error::Unsupported("hardlink to a directory".into()))
+                return Err(Error::Invalid("hardlink to a directory".into()))
             }
             Some(_) => {}
-            None => return Err(Error::Unsupported("invalid handle".into())),
+            None => return Err(Error::Invalid("invalid handle".into())),
         }
         if self.nodes[target.0 as usize].nlink >= LINK_MAX {
-            return Err(Error::Unsupported(format!("more than {LINK_MAX} links")));
+            return Err(Error::Invalid(format!("more than {LINK_MAX} links")));
         }
         self.add_entry(parent, name, target.0)?;
         self.nodes[target.0 as usize].nlink += 1;
@@ -484,7 +493,7 @@ impl FsBuilder {
     pub fn set_meta(&mut self, handle: InodeHandle, meta: Meta) -> Result<()> {
         self.nodes
             .get_mut(handle.0 as usize)
-            .ok_or_else(|| Error::Unsupported("invalid handle".into()))?
+            .ok_or_else(|| Error::Invalid("invalid handle".into()))?
             .meta = meta;
         Ok(())
     }
@@ -493,9 +502,9 @@ impl FsBuilder {
     /// entire subtree (DESIGN.md §3); files drop out entirely when their
     /// last link goes.
     pub fn remove(&mut self, dir: InodeHandle, name: &str) -> Result<()> {
-        let children = match &self.nodes[dir.0 as usize].kind {
-            NodeKind::Dir { children } => children,
-            _ => return Err(Error::Unsupported("parent is not a directory".into())),
+        let children = match self.nodes.get(dir.0 as usize).map(|n| &n.kind) {
+            Some(NodeKind::Dir { children }) => children,
+            _ => return Err(Error::Invalid("parent is not a directory".into())),
         };
         let mut found = None;
         for (i, (nref, child, dead)) in children.iter().enumerate() {
@@ -505,7 +514,7 @@ impl FsBuilder {
             }
         }
         let Some((idx, child)) = found else {
-            return Err(Error::Unsupported(format!("{name:?} not found")));
+            return Err(Error::Invalid(format!("{name:?} not found")));
         };
         if let NodeKind::Dir { children } = &mut self.nodes[dir.0 as usize].kind {
             children[idx].2 = true;

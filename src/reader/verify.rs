@@ -69,7 +69,7 @@ fn verify_groups<R: ReadAt>(
     let sb = fs.superblock();
     let seed = fs.fs_seed();
     for g in 0..sb.group_count() {
-        let raw = fs.group_desc_raw(g);
+        let raw = fs.group_desc_raw(g)?;
         let desc = fs.group_desc(g)?;
         if !has_csum {
             continue;
@@ -148,7 +148,8 @@ fn verify_inode<R: ReadAt>(
         return Ok(());
     }
     if inode.links_count == 0 && inode.dtime != 0 {
-        return Ok(()); // legitimately deleted inode still in bitmap? flag:
+        // A deleted-but-still-bitmapped inode; e2fsck owns that verdict.
+        return Ok(());
     }
 
     let extents = match fs.extents(ino, &inode) {
@@ -250,7 +251,8 @@ fn verify_dir<R: ReadAt>(
         Signedness::Signed
     };
 
-    // Collect (leaf_block, lo_hash, hi_hash, hi_has_collision_bit).
+    // Collect (leaf_block, lo_hash, hi_bound) — the collision bit is
+    // already folded into the exclusive upper bound.
     let mut leaves: Vec<(u32, u32, u64)> = Vec::new();
     let ranges = |entries: &[spec::DxEntry]| -> Vec<(u32, u32, u64)> {
         let mut v = Vec::with_capacity(entries.len());

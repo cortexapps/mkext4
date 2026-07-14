@@ -56,6 +56,7 @@ impl Allocator {
     }
 
     /// Blocks remaining allocatable.
+    #[cfg(test)]
     pub fn remaining(&self) -> u64 {
         let mut free = self.end.saturating_sub(self.cursor);
         for r in &self.reserved[self.next_reserved.min(self.reserved.len())..] {
@@ -138,9 +139,8 @@ mod tests {
     fn max_run_caps_segments() {
         let mut a = Allocator::new(0, 1000, vec![]);
         let runs = a.take(10, 4).unwrap();
-        // Contiguous despite the cap: merged back into one run by the
-        // caller-visible representation? No — extent building needs the
-        // splits, so they stay separate runs of <= max_run.
+        // Extent building needs the splits, so capped runs are never
+        // merged back together even when physically contiguous.
         assert!(runs.iter().all(|r| r.len <= 4));
         assert_eq!(runs.iter().map(|r| r.len).sum::<u64>(), 10);
     }
