@@ -32,6 +32,21 @@ mode / nanosecond-timestamp metadata, and a well-formed empty journal.
 See [`examples/mkfs.rs`](examples/mkfs.rs) for the `mke2fs -d` equivalent
 built on this API.
 
+## The byte-stability contract
+
+Know this before depending on the determinism:
+
+- **Within one crate version, bytes are stable**: the same options and
+  the same declaration sequence produce a byte-identical image, on any
+  machine, every time.
+- **Across versions, semantics are stable — bytes are not**: every
+  version produces a correct, `e2fsck`-clean, kernel-mountable image of
+  the same namespace, but layout policy (allocation order, htree
+  packing, split points) may improve between releases.
+- If you rely on byte-identical output — content-addressed dedup, image
+  caching, chunk manifests — **pin an exact version** (`mkext4 = "=x.y.z"`)
+  and treat every upgrade as a deliberate cache-invalidation event.
+
 ## Why
 
 Turning a declared namespace (think: unpacked container layers) into a
