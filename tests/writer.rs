@@ -482,6 +482,51 @@ fn two_level_htree() {
 }
 
 #[test]
+fn flat_100k_entry_directory() {
+    // The primary htree target shape: one directory, 100k entries.
+    // Declaration must be far from quadratic (a regression makes this
+    // test hang), removal/redeclare must stay exact, and the image must
+    // pass every gate.
+    let size = 1u64 << 30;
+    let mut opts = options(size);
+    opts.inodes = InodeCount::Exact(120_000);
+    let mut b = FsBuilder::new(opts).unwrap();
+    let d = b.mkdir(ROOT, "flat", meta(0o755)).unwrap();
+    for i in 0..100_000u32 {
+        b.file(d, &format!("entry_{i:06}_pad"), meta(0o644), 0)
+            .unwrap();
+    }
+    // Whiteout + redeclare a sample under the same names.
+    for i in (0..100_000u32).step_by(1000) {
+        b.remove(d, &format!("entry_{i:06}_pad")).unwrap();
+        b.file(d, &format!("entry_{i:06}_pad"), meta(0o600), 0)
+            .unwrap();
+    }
+    let layout = b.seal().unwrap();
+    let mut sink = VecSink::default();
+    layout.writer(&mut sink).unwrap().finish().unwrap();
+    let image = sink.buf;
+    common::assert_fsck_clean(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &image,
+        "writer_flat100k",
+    );
+    let fs = Fs::open(&image[..]).unwrap();
+    assert!(fs.verify().unwrap().is_empty());
+    let flat = fs.resolve("/flat").unwrap();
+    let n = fs
+        .read_dir(flat)
+        .unwrap()
+        .iter()
+        .filter(|e| e.name != b"." && e.name != b"..")
+        .count();
+    assert_eq!(n, 100_000);
+    // Redeclared entries carry the new mode.
+    let ino = fs.resolve("/flat/entry_042000_pad").unwrap();
+    assert_eq!(fs.inode(ino).unwrap().mode & 0o7777, 0o600);
+}
+
+#[test]
 fn unfilled_file_errors_and_poisoning() {
     let size = 16 << 20;
     let mut b = FsBuilder::new(options(size)).unwrap();

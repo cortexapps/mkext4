@@ -605,7 +605,7 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
         }
 
         match &b.nodes[slot as usize].kind {
-            NodeKind::Dir { children } => {
+            NodeKind::Dir { children, .. } => {
                 let parent_ino = if slot == 0 {
                     ROOT_INO
                 } else {
@@ -835,7 +835,7 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
         if slot_ino[slot] == 0 {
             continue;
         }
-        if let NodeKind::Dir { children } = &node.kind {
+        if let NodeKind::Dir { children, .. } = &node.kind {
             subdirs[slot] = children
                 .iter()
                 .filter(|&&(_, c, dead)| {
@@ -1220,15 +1220,19 @@ fn expand_runs(runs: &[Run]) -> Vec<u64> {
     out
 }
 
-fn mark_reachable(b: &FsBuilder, slot: u32, seen: &mut [bool]) -> Result<()> {
-    if seen[slot as usize] {
-        return Ok(());
-    }
-    seen[slot as usize] = true;
-    if let NodeKind::Dir { children } = &b.nodes[slot as usize].kind {
-        for &(_, child, dead) in children {
-            if !dead {
-                mark_reachable(b, child, seen)?;
+/// Iterative (worklist) reachability: recursion here would put
+/// namespace depth on the call stack, which untrusted inputs control.
+fn mark_reachable(b: &FsBuilder, root: u32, seen: &mut [bool]) -> Result<()> {
+    let mut stack = vec![root];
+    while let Some(slot) = stack.pop() {
+        if std::mem::replace(&mut seen[slot as usize], true) {
+            continue;
+        }
+        if let NodeKind::Dir { children, .. } = &b.nodes[slot as usize].kind {
+            for &(_, child, dead) in children {
+                if !dead {
+                    stack.push(child);
+                }
             }
         }
     }
@@ -1243,7 +1247,7 @@ fn parent_map(b: &FsBuilder, slot_ino: &[u32]) -> Vec<u32> {
         if slot_ino[p] == 0 {
             continue;
         }
-        if let NodeKind::Dir { children } = &node.kind {
+        if let NodeKind::Dir { children, .. } = &node.kind {
             for &(_, c, dead) in children {
                 if !dead {
                     parents[c as usize] = slot_ino[p];

@@ -3,11 +3,14 @@
 #
 #   (a) small-files: ~120k small files across nested dirs (node_modules-like)
 #   (b) big-files:   ~4 GiB tree containing multi-GiB files
+#   (c) flat-dir:    120k files in ONE directory (pnpm-store shape; the
+#                    case the htree requirement exists for)
 #
 # Usage: tools/bench.sh [outdir]
 #   E2SBIN         e2fsprogs sbin dir (default: brew keg or PATH)
 #   BENCH_SMALL=0  skip the small-files benchmark
 #   BENCH_BIG=0    skip the big-files benchmark
+#   BENCH_FLAT=0   skip the flat-dir benchmark
 #   ASSERT_FASTER=1  exit nonzero unless mkext4 wins both
 #
 # Requires hyperfine.
@@ -45,6 +48,20 @@ print(n, "files", file=sys.stderr)
 EOF
 }
 
+make_flat_tree() {    # 120k small files in a single directory
+    local t=$1
+    [ -d "$t" ] && return
+    echo "generating flat-dir tree..." >&2
+    python3 - "$t" <<'PYEOF2'
+import os, sys
+d = os.path.join(sys.argv[1], "flat")
+os.makedirs(d, exist_ok=True)
+for i in range(120000):
+    with open(os.path.join(d, "entry_%06d_pad" % i), "wb") as fh:
+        fh.write(b"x" * (100 + (i * 37) % 2000))
+PYEOF2
+}
+
 make_big_tree() {     # ~4 GiB: two multi-GiB files + some medium ones
     local t=$1
     [ -d "$t" ] && return
@@ -80,6 +97,10 @@ EOF
 if [ "${BENCH_SMALL:-1}" = 1 ]; then
     make_small_tree "$OUT/tree-small"
     run_case small "$OUT/tree-small" 262144 160000    # 1 GiB image
+fi
+if [ "${BENCH_FLAT:-1}" = 1 ]; then
+    make_flat_tree "$OUT/tree-flat"
+    run_case flat "$OUT/tree-flat" 262144 160000      # 1 GiB image
 fi
 if [ "${BENCH_BIG:-1}" = 1 ]; then
     make_big_tree "$OUT/tree-big"

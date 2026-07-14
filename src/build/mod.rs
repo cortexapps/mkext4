@@ -158,8 +158,19 @@ pub(crate) struct NameRef {
 pub(crate) enum NodeKind {
     Dir {
         /// (name, child) in declaration order; tombstoned entries keep
-        /// their slot but are skipped everywhere.
+        /// their slot but are skipped everywhere. This vector alone
+        /// defines dirent order — the index below never reaches output.
         children: Vec<(NameRef, u32, bool)>,
+        /// Live name -> position in `children`, so duplicate checks and
+        /// removals are O(1) instead of a scan (flat 100k+-entry
+        /// directories are a primary target). Tombstoned names are
+        /// deleted from the index so they can be redeclared.
+        ///
+        /// Determinism note: a HashMap is safe here because it is used
+        /// for point lookups only and is NEVER iterated — the crate's
+        /// no-hash-ordered-iteration rule is about iteration order
+        /// reaching the output path.
+        index: std::collections::HashMap<Box<[u8]>, usize>,
     },
     File {
         size: u64,
@@ -265,6 +276,7 @@ impl FsBuilder {
             nodes: vec![Node {
                 kind: NodeKind::Dir {
                     children: Vec::new(),
+                    index: std::collections::HashMap::new(),
                 },
                 meta: root_meta,
                 nlink: 1,
@@ -299,25 +311,30 @@ impl FsBuilder {
         &self.names[r.off as usize..r.off as usize + usize::from(r.len)]
     }
 
-    fn dir_children_mut(&mut self, dir: InodeHandle) -> Result<&mut Vec<(NameRef, u32, bool)>> {
+    #[allow(clippy::type_complexity)]
+    fn dir_mut(
+        &mut self,
+        dir: InodeHandle,
+    ) -> Result<(
+        &mut Vec<(NameRef, u32, bool)>,
+        &mut std::collections::HashMap<Box<[u8]>, usize>,
+    )> {
         match self.nodes.get_mut(dir.0 as usize).map(|n| &mut n.kind) {
-            Some(NodeKind::Dir { children }) => Ok(children),
+            Some(NodeKind::Dir { children, index }) => Ok((children, index)),
             Some(_) => Err(Error::Invalid("parent is not a directory".into())),
             None => Err(Error::Invalid("invalid handle".into())),
         }
     }
 
     fn check_duplicate(&self, dir: InodeHandle, name: &str) -> Result<()> {
-        let Some(NodeKind::Dir { children }) = self.nodes.get(dir.0 as usize).map(|n| &n.kind)
+        let Some(NodeKind::Dir { index, .. }) = self.nodes.get(dir.0 as usize).map(|n| &n.kind)
         else {
             return Err(Error::Invalid("parent is not a directory".into()));
         };
-        for (nref, _, dead) in children {
-            if !dead && self.name(*nref) == name.as_bytes() {
-                return Err(Error::Invalid(format!(
-                    "duplicate name {name:?} (remove it first)"
-                )));
-            }
+        if index.contains_key(name.as_bytes()) {
+            return Err(Error::Invalid(format!(
+                "duplicate name {name:?} (remove it first)"
+            )));
         }
         Ok(())
     }
@@ -325,7 +342,9 @@ impl FsBuilder {
     fn add_entry(&mut self, dir: InodeHandle, name: &str, child: u32) -> Result<()> {
         self.check_duplicate(dir, name)?;
         let nref = self.intern(name)?;
-        self.dir_children_mut(dir)?.push((nref, child, false));
+        let (children, index) = self.dir_mut(dir)?;
+        index.insert(name.as_bytes().into(), children.len());
+        children.push((nref, child, false));
         Ok(())
     }
 
@@ -336,6 +355,7 @@ impl FsBuilder {
         self.nodes.push(Node {
             kind: NodeKind::Dir {
                 children: Vec::new(),
+                index: std::collections::HashMap::new(),
             },
             meta,
             nlink: 1,
@@ -539,23 +559,12 @@ impl FsBuilder {
     /// entire subtree; files drop out entirely when their
     /// last link goes.
     pub fn remove(&mut self, dir: InodeHandle, name: &str) -> Result<()> {
-        let children = match self.nodes.get(dir.0 as usize).map(|n| &n.kind) {
-            Some(NodeKind::Dir { children }) => children,
-            _ => return Err(Error::Invalid("parent is not a directory".into())),
-        };
-        let mut found = None;
-        for (i, (nref, child, dead)) in children.iter().enumerate() {
-            if !dead && self.name(*nref) == name.as_bytes() {
-                found = Some((i, *child));
-                break;
-            }
-        }
-        let Some((idx, child)) = found else {
+        let (children, index) = self.dir_mut(dir)?;
+        let Some(idx) = index.remove(name.as_bytes()) else {
             return Err(Error::Invalid(format!("{name:?} not found")));
         };
-        if let NodeKind::Dir { children } = &mut self.nodes[dir.0 as usize].kind {
-            children[idx].2 = true;
-        }
+        children[idx].2 = true;
+        let child = children[idx].1;
         match &self.nodes[child as usize].kind {
             NodeKind::Dir { .. } => self.remove_subtree(child),
             _ => self.unlink(child),
@@ -576,24 +585,30 @@ impl FsBuilder {
         }
     }
 
+    /// Iterative (worklist) subtree removal: recursion here would put
+    /// namespace depth on the call stack, and untrusted inputs (e.g. a
+    /// hostile tar with a 50k-component path) control that depth.
     fn remove_subtree(&mut self, dir_slot: u32) {
-        self.nodes[dir_slot as usize].nlink = 0;
-        let entries: Vec<(u32, bool)> = match &self.nodes[dir_slot as usize].kind {
-            NodeKind::Dir { children } => children.iter().map(|&(_, c, d)| (c, d)).collect(),
-            _ => unreachable!(),
-        };
-        if let NodeKind::Dir { children } = &mut self.nodes[dir_slot as usize].kind {
-            for e in children.iter_mut() {
-                e.2 = true;
-            }
-        }
-        for (child, dead) in entries {
-            if dead {
-                continue;
-            }
-            match &self.nodes[child as usize].kind {
-                NodeKind::Dir { .. } => self.remove_subtree(child),
-                _ => self.unlink(child),
+        let mut stack = vec![dir_slot];
+        while let Some(slot) = stack.pop() {
+            self.nodes[slot as usize].nlink = 0;
+            let NodeKind::Dir { children, index } = &mut self.nodes[slot as usize].kind else {
+                unreachable!()
+            };
+            index.clear();
+            let live: Vec<u32> = children
+                .iter_mut()
+                .filter(|e| !e.2)
+                .map(|e| {
+                    e.2 = true;
+                    e.1
+                })
+                .collect();
+            for child in live {
+                match &self.nodes[child as usize].kind {
+                    NodeKind::Dir { .. } => stack.push(child),
+                    _ => self.unlink(child),
+                }
             }
         }
     }
@@ -602,5 +617,73 @@ impl FsBuilder {
     /// metadata byte and every future data offset is decided here.
     pub fn seal(self) -> Result<Layout> {
         seal::seal(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn builder() -> FsBuilder {
+        FsBuilder::new(Options::new(16 << 20, [1; 16], 1_704_067_200)).unwrap()
+    }
+
+    fn meta() -> Meta {
+        Meta::new(0o644, 0, 0, (1_704_067_200, 0))
+    }
+
+    #[test]
+    fn name_index_tracks_declarations() {
+        let mut b = builder();
+        b.file(ROOT, "a", meta(), 0).unwrap();
+        // Duplicate rejected via the index.
+        assert!(matches!(
+            b.file(ROOT, "a", meta(), 0),
+            Err(Error::Invalid(_))
+        ));
+        // Remove deletes the index entry: the name is redeclarable and a
+        // second remove errors.
+        b.remove(ROOT, "a").unwrap();
+        assert!(matches!(b.remove(ROOT, "a"), Err(Error::Invalid(_))));
+        b.file(ROOT, "a", meta(), 0).unwrap();
+        // Tombstoned entry stays in `children` (declaration order), the
+        // live redeclaration is a new position.
+        let NodeKind::Dir { children, index } = &b.nodes[0].kind else {
+            unreachable!()
+        };
+        assert_eq!(children.len(), 2);
+        assert!(children[0].2, "first declaration is tombstoned");
+        assert!(!children[1].2);
+        assert_eq!(index.len(), 1);
+        let key: Box<[u8]> = b"a"[..].into();
+        assert_eq!(index[&key], 1);
+    }
+
+    #[test]
+    fn subtree_removal_clears_index_and_unlinks() {
+        let mut b = builder();
+        let d = b.mkdir(ROOT, "d", meta()).unwrap();
+        let f = b.file(d, "f", meta(), 10).unwrap();
+        b.hardlink(ROOT, "keep", f).unwrap(); // survives subtree removal
+        let sub = b.mkdir(d, "sub", meta()).unwrap();
+        b.file(sub, "g", meta(), 0).unwrap();
+        b.remove(ROOT, "d").unwrap();
+        assert_eq!(b.nodes[d.0 as usize].nlink, 0);
+        assert_eq!(b.nodes[sub.0 as usize].nlink, 0);
+        assert_eq!(b.nodes[f.0 as usize].nlink, 1, "outside hardlink survives");
+        // "d" is redeclarable at the root.
+        b.mkdir(ROOT, "d", meta()).unwrap();
+    }
+
+    #[test]
+    fn deep_namespace_removal_does_not_recurse() {
+        // 100k-deep chain: stack-safe removal is required.
+        let mut b = builder();
+        let mut dir = ROOT;
+        for i in 0..100_000 {
+            dir = b.mkdir(dir, &format!("d{i}"), meta()).unwrap();
+        }
+        b.remove(ROOT, "d0").unwrap();
+        assert!(matches!(b.remove(ROOT, "d0"), Err(Error::Invalid(_))));
     }
 }
