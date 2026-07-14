@@ -57,6 +57,48 @@ impl RegionSink for VecSink {
     }
 }
 
+/// Writes the image to a file with positioned writes; `zeros` regions
+/// are elided (the file is extended sparsely instead), so untouched
+/// space costs no I/O.
+#[cfg(unix)]
+pub struct FileSink {
+    file: std::fs::File,
+    len: u64,
+}
+
+#[cfg(unix)]
+impl FileSink {
+    /// Create (truncate) `path` and pre-size it to `image_len` — the
+    /// kernel materializes the zeros lazily.
+    pub fn create(path: &std::path::Path, image_len: u64) -> io::Result<FileSink> {
+        let file = std::fs::File::create(path)?;
+        file.set_len(image_len)?;
+        Ok(FileSink {
+            file,
+            len: image_len,
+        })
+    }
+
+    /// Flush and return the file.
+    pub fn into_file(self) -> std::fs::File {
+        self.file
+    }
+}
+
+#[cfg(unix)]
+impl RegionSink for FileSink {
+    fn data(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+        std::os::unix::fs::FileExt::write_all_at(&self.file, bytes, offset)
+    }
+    fn zeros(&mut self, offset: u64, len: u64) -> io::Result<()> {
+        // Already zero via set_len; validate the range instead.
+        if offset + len > self.len {
+            return Err(io::Error::other("zeros past image end"));
+        }
+        Ok(())
+    }
+}
+
 /// Wraps a sink and asserts the exactly-once coverage contract; used by
 /// the test suite around every image build.
 pub struct CheckingSink<S> {

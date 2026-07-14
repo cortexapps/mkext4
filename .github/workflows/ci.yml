@@ -51,6 +51,13 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # Loop-mount kernel-oracle lane lands with the writer (phase 3): it will
-  # mount generated images and diff the tree against the declared
-  # namespace. Kept as a separate job so it can run privileged steps.
+      # Kernel oracle: loop-mount a generated image and diff the mounted
+      # tree against the declared namespace. Build unprivileged, run the
+      # test binary under sudo.
+      - name: kernel oracle (loop mount)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y -qq attr >/dev/null
+          BIN=$(cargo test --test mount --no-run --message-format=json \
+                | jq -r 'select(.executable != null) | select(.target.name == "mount") | .executable' | tail -1)
+          sudo STREAMEXT4_MOUNT=1 "$BIN" --nocapture
