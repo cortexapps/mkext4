@@ -100,6 +100,9 @@ pub struct Options {
     pub features: Features,
 }
 
+/// Declared xattrs per builder slot.
+pub(crate) type XattrDecls = std::collections::BTreeMap<u32, Vec<xattr_build::Attr>>;
+
 /// Handle to a declared inode. Hardlinks are additional names for the
 /// same handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -189,7 +192,7 @@ pub struct FsBuilder {
     pub(crate) names: Vec<u8>,
     /// xattrs per slot: (name_index, name-after-prefix, value), few
     /// nodes have any, so a side map beats a per-node field.
-    pub(crate) xattrs: std::collections::BTreeMap<u32, Vec<(u8, Vec<u8>, Vec<u8>)>>,
+    pub(crate) xattrs: XattrDecls,
     /// Total declared file bytes of all currently-linked files (upper
     /// bound; recomputed exactly at seal).
     declared_bytes: u64,
