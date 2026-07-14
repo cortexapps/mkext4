@@ -24,3 +24,6 @@ missing_docs = "warn"
 # debug_assertions stay on.
 [profile.test]
 opt-level = 2
+
+[dev-dependencies]
+proptest = "1.8.0"
