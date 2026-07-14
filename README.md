@@ -1,6 +1,6 @@
 # streamext4
 
-[![CI](https://github.com/cortexapps/mke2fs-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/cortexapps/mke2fs-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/cortexapps/streamext4/actions/workflows/ci.yml/badge.svg)](https://github.com/cortexapps/streamext4/actions/workflows/ci.yml)
 
 Deterministic, streaming, pure-Rust ext4 image builder — plus a
 verification-grade reader. No C dependencies, no kernel mounts, no clocks,

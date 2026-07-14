@@ -174,12 +174,11 @@ fn verify_inode<R: ReadAt>(
 
     match inode.file_type() {
         spec::inode::FileType::Dir => verify_dir(fs, ino, &inode, has_csum, issues)?,
-        spec::inode::FileType::Symlink => {
+        spec::inode::FileType::Symlink
             if inode.fast_symlink_target().is_none()
-                && (inode.size == 0 || inode.size >= fs.block_size)
-            {
-                issue!(issues, "inode {ino}: symlink target size {}", inode.size);
-            }
+                && (inode.size == 0 || inode.size >= fs.block_size) =>
+        {
+            issue!(issues, "inode {ino}: symlink target size {}", inode.size);
         }
         _ => {}
     }

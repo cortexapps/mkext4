@@ -570,8 +570,10 @@ Verified against `e2fsck -fD`-built trees (1-level, 300 entries; 2-level,
   the inode. Entry: `{e_name_len u8, e_name_index u8, e_value_offs u16,
   e_value_inum u32 = 0, e_value_size u32, e_hash u32, name bytes}`, entries
   4-byte aligned, list terminated by 4 zero bytes. **`e_hash = 0` for
-  in-inode entries** [verified]; `e_value_offs` is relative to the start of
-  the in-inode area (the magic word).
+  in-inode entries** [verified]; `e_value_offs` is relative to the **first
+  entry position, i.e. after the 4-byte magic** (kernel `IFIRST`)
+  [verified byte-exactly — offsets relative to the magic word itself are
+  off by 4].
 - **xattr block** (at most one, `i_file_acl`, i_blocks += 8 [verified]):
   32-byte header `{h_magic 0xEA020000, h_refcount = 1, h_blocks = 1,
   h_hash, h_checksum, reserved}`; entries from 0x20, values packed downward
