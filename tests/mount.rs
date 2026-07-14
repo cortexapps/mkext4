@@ -50,10 +50,11 @@ fn kernel_mount_oracle() {
     std::fs::create_dir_all(&mnt).unwrap();
 
     // --- build ------------------------------------------------------------
-    let size = 256u64 << 20;
+    let size = 1u64 << 30;
     let mut opts = Options::new(size, *b"mkext4-mounttest", EPOCH);
     opts.hash_seed = [1, 2, 3, 4];
     opts.label = Some("mnttest".into());
+    opts.inodes = mkext4::InodeCount::Exact(150_000);
     let mut b = FsBuilder::new(opts).unwrap();
 
     let usr = b.mkdir(ROOT, "usr", meta(0o755, 0, 0)).unwrap();
@@ -90,9 +91,11 @@ fn kernel_mount_oracle() {
     b.set_xattr(xf, "user.big", &vec![0x41u8; 500]).unwrap();
     b.set_xattr(xf, "security.selinux", b"system_u:object_r:etc_t:s0")
         .unwrap();
+    // 100k entries in one directory: the htree proof, looked up through
+    // the kernel below.
     let htree = b.mkdir(ROOT, "htree", meta(0o755, 0, 0)).unwrap();
-    for i in 0..5000 {
-        b.file(htree, &format!("entry_{i:05}_padpad"), meta(0o644, 0, 0), 0)
+    for i in 0..100_000 {
+        b.file(htree, &format!("entry_{i:06}_padpad"), meta(0o644, 0, 0), 0)
             .unwrap();
     }
     let sp = b
@@ -183,12 +186,16 @@ fn kernel_mount_oracle() {
         b"system_u:object_r:etc_t:s0"
     );
 
-    // htree lookups through the kernel (not a linear scan on our side).
-    for i in [0, 2500, 4999] {
-        let p = mnt.join(format!("htree/entry_{i:05}_padpad"));
-        assert!(p.exists(), "{}", p.display());
+    // htree proof: kernel-side hashed lookups of a deterministic 1k-name
+    // sample across the 100k-entry directory, plus a full readdir count.
+    for i in (0..100_000).step_by(100) {
+        let p = mnt.join(format!("htree/entry_{i:06}_padpad"));
+        assert!(p.symlink_metadata().is_ok(), "{}", p.display());
     }
-    assert_eq!(std::fs::read_dir(mnt.join("htree")).unwrap().count(), 5000);
+    assert_eq!(
+        std::fs::read_dir(mnt.join("htree")).unwrap().count(),
+        100_000
+    );
 
     // Sparse: size, hole reads as zeros, block count reflects holes.
     let sp_path = mnt.join("sparse");
@@ -214,7 +221,7 @@ fn kernel_mount_oracle() {
         }
         n
     }
-    assert!(walk(&mnt) > 5000);
+    assert!(walk(&mnt) > 100_000);
 
     let _ = std::fs::remove_file(&img);
 
