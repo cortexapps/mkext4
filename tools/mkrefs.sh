@@ -9,7 +9,7 @@
 # Every image uses the exact feature set targeted by the crate:
 #   compat:   has_journal ext_attr dir_index
 #   incompat: filetype extent flex_bg
-#   ro:       sparse_super large_file huge_file extra_isize metadata_csum
+#   ro:       sparse_super large_file huge_file dir_nlink extra_isize metadata_csum
 # with fixed UUID + fixed htree hash seed, no lazy init, 4k blocks, 256B inodes.
 #
 # Gate: every image must pass `e2fsck -fn` before extraction runs.
@@ -28,7 +28,7 @@ E2FSCK=$E2SBIN/e2fsck
 OUT=${1:-build/refs}
 UUID=d0d0caca-0000-4000-8000-000000000001
 HASH_SEED=deadbeef-dead-4ead-8ead-deadbeef0000
-FEATURES='^64bit,^metadata_csum_seed,^dir_nlink,^orphan_file,^resize_inode'
+FEATURES='^64bit,^metadata_csum_seed,^orphan_file,^resize_inode'
 
 mkdir -p "$OUT"/{img,tree,extract}
 
