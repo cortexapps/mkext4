@@ -86,11 +86,19 @@ enum Expect {
     Dir,
 }
 
+#[derive(Clone, Copy)]
+struct LastFile {
+    handle: InodeHandle,
+    size: u64,
+    seed: u64,
+    sparse: Option<(u64, u64, u64)>,
+}
+
 struct Builder {
     b: FsBuilder,
     fills: Vec<(InodeHandle, u64 /* data bytes */, u64 /* seed */)>,
     model: HashMap<String, Expect>,
-    last_file: Option<(InodeHandle, u64, u64, Option<(u64, u64, u64)>)>,
+    last_file: Option<LastFile>,
     seed: u64,
 }
 
@@ -119,7 +127,12 @@ impl Builder {
                             sparse: None,
                         },
                     );
-                    self.last_file = Some((h, *size, seed, None));
+                    self.last_file = Some(LastFile {
+                        handle: h,
+                        size: *size,
+                        seed,
+                        sparse: None,
+                    });
                 }
                 GenNode::Sparse { head, hole, tail } => {
                     let mut segs = vec![SparseSeg::Data(head * 4096)];
@@ -151,14 +164,14 @@ impl Builder {
                     );
                 }
                 GenNode::Hardlink => {
-                    if let Some((h, size, fseed, sparse)) = self.last_file {
-                        self.b.hardlink(dir, name, h).unwrap();
+                    if let Some(lf) = self.last_file {
+                        self.b.hardlink(dir, name, lf.handle).unwrap();
                         self.model.insert(
                             path,
                             Expect::File {
-                                size,
-                                seed: fseed,
-                                sparse,
+                                size: lf.size,
+                                seed: lf.seed,
+                                sparse: lf.sparse,
                             },
                         );
                     }
