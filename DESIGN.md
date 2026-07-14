@@ -32,9 +32,13 @@ Golden byte fixtures live in `testdata/vectors/`.
     dir_index (0x20)
   - `s_feature_incompat = 0x242` — filetype (0x2), extents (0x40),
     flex_bg (0x200)
-  - `s_feature_ro_compat = 0x44B` — sparse_super (0x1), large_file (0x2),
-    huge_file (0x8), extra_isize (0x40), metadata_csum (0x400)
-- Explicitly **off**: 64bit, resize_inode, dir_nlink, orphan_file,
+  - `s_feature_ro_compat = 0x46B` — sparse_super (0x1), large_file (0x2),
+    huge_file (0x8), **dir_nlink (0x20)**, extra_isize (0x40),
+    metadata_csum (0x400). dir_nlink is included so that a flat directory
+    of > ~65k subdirectories (pnpm stores, content-addressed caches) is
+    representable instead of a builder error — it costs one ro_compat bit
+    and a store-nlink-1-on-overflow rule (§9).
+- Explicitly **off**: 64bit, resize_inode, orphan_file,
   metadata_csum_seed, meta_bg, inline_data, bigalloc, largedir, ea_inode,
   quota, mmp, encrypt, casefold.
 - Image size is an explicit, required option (4096-aligned byte count).
@@ -58,7 +62,8 @@ The output image is a pure function of:
    volume label; inode count policy (`Exact(n)` or `Auto`); reserved-blocks
    percent; journal size override (blocks) if given.
 2. **The declaration sequence, including order**: every `mkdir` / `file` /
-   `hardlink` / `symlink` / `mknod` / `remove` call with its arguments
+   `hardlink` / `symlink` / `mknod` / `set_meta` / `set_xattr` / `remove`
+   call with its arguments
    (names as byte strings, per-file metadata: mode, uid, gid, mtime — and
    optional atime/ctime/crtime, each with nanosecond precision — xattrs,
    declared sizes and hole maps).
@@ -112,7 +117,8 @@ b.hardlink(usr, "dog", f)?;                        // shared inode, nlink 2
 b.symlink(usr, "sh", "bash", meta)?;
 b.mknod(usr, "null", meta, NodeKind::Char { major: 1, minor: 3 })?;
 b.set_xattr(f, "security.selinux", value)?;
-b.remove(usr, "stale")?;                           // tombstone during declaration
+b.set_meta(ROOT, root_meta)?;                      // root is declarable too
+b.remove(usr, "stale")?;                           // recursive tombstone
 
 let layout = b.seal()?;                            // freeze EVERYTHING (§4)
 let mut w = layout.writer(&mut sink)?;             // emits all metadata + zeros here
@@ -122,23 +128,60 @@ let summary = w.finish()?;                         // error if any file unfilled
 ```
 
 - **Handles** (`InodeHandle`) are indices into the builder's table; hardlinks
-  are first-class (`hardlink` bumps nlink, adds a dirent). `remove`
-  tombstones a name; a removed regular file with zero remaining links drops
-  out of layout entirely (its declaration slot still counts for ordering of
-  survivors only, i.e. data-block order is declaration order *of surviving
-  files*).
+  are first-class (`hardlink` bumps nlink, adds a dirent).
+- **Root metadata**: `ROOT` is a real handle. `set_meta(ROOT, meta)` and
+  `set_xattr(ROOT, …)` cover OCI layers whose `./` entry carries explicit
+  root mode/owner/mtime. If never declared, root defaults to mode 0o755,
+  uid 0, gid 0, all timestamps = `epoch`, no xattrs. `set_meta(h, meta)`
+  works on *any* live handle before seal (last call wins) — it is part of
+  the declaration sequence and thus of the determinism input.
+- **`remove(parent, name)` is a recursive tombstone**: removing a
+  directory removes its entire subtree (the opaque-whiteout case). Any
+  inode whose link count drops to zero leaves the layout entirely — no
+  inode number, no blocks, no dirent. Hardlinked files survive subtree
+  removal if a link outside the subtree remains. **Data-order rule**:
+  data-block order is declaration order *filtered to surviving files* —
+  removing a subtree deletes its slots from the sequence (no holes, no
+  renumbering of others), and re-added files occupy their new declaration
+  position. Whiteout/subtree-removal patterns are part of the proptest
+  namespace generator (§19.7).
 - **Sizes are final**: `fill` must supply exactly the declared byte count
   (short/long reads are errors). Sparse files declare an explicit
   data/hole segment map; only data segments are filled.
+- **Fill completeness**: zero-length files, all-hole sparse files, and
+  every non-regular inode are complete at seal — `finish()` does not
+  require a `fill` for them (a `fill` supplying exactly 0 bytes is an
+  allowed no-op). If a `fill` fails partway (source error, short read,
+  sink error), the **writer is poisoned**: the failed file's remaining
+  bytes are unemitted, and every subsequent call including `finish()`
+  returns an error identifying the poisoned state. There is no partial
+  recovery — callers that can retry rebuild the writer from the (still
+  valid, reusable) `layout`. The already-emitted prefix is well-formed
+  per the sink contract, so a consumer can safely discard by offset.
+- **Push-style fill** (deferred convenience, phase 4+): `fill_writer(f) ->
+  impl io::Write` alongside pull-style `fill(f, &mut impl Read)`, for
+  channel-fed pipelines that push; same exactness rules, completion on
+  `Write` drop/flush-to-declared-size.
+- **Memory model** (the 1M-inode budget is designed, not discovered):
+  per-inode fixed-size record (target ≤ 64 B: type/mode/uid/gid packed,
+  times, size, nlink, parent, xattr ref); all names in a single append-only
+  byte arena referenced by (u32 offset, u8 len); children stored as
+  contiguous index runs (children of one dir are declared contiguously or
+  gathered once at seal — no per-entry heap allocation, no PathBuf/String
+  anywhere); xattrs deduplicated through an interning arena; extent lists
+  computed streaming during the seal sweep, never materialized per-block.
+  Budget: ~100–150 B/inode + name bytes ⇒ ≈ 200 MiB for 1M inodes; hard
+  design ceiling ≤ 1 GiB including htree build scratch (hash-sort of the
+  largest single directory).
 - `seal()` freezes: inode numbers, every block address, extent trees,
   dirent/htree bytes, bitmaps, group descriptors, superblock — the complete
   metadata image and the offset of every future data byte
   (`layout.extents(f)` exposes them).
 - Validation (builder-time or seal-time errors): name length 1..=255 bytes,
   no `/` or NUL, not `.`/`..`; duplicate names only via explicit overwrite
-  semantics of `remove`+re-add; symlink target 1..=4095 bytes; directory
-  nlink ≤ 64,998 (no dir_nlink feature — subdir count is bounded);
-  hardlinks to directories rejected; size overflow vs image size; inode
+  semantics of `remove`+re-add; symlink target 1..=4095 bytes; regular-file
+  hardlink count ≤ 65,000 (directories have no subdir bound — dir_nlink,
+  §9); hardlinks to directories rejected; size overflow vs image size; inode
   exhaustion vs `InodeCount`; xattr total size vs in-inode + one block
   (§13); device numbers within Linux `dev_t` range (major ≤ 4095 for the
   new encoding, minor ≤ 2^20−1).
@@ -295,7 +338,7 @@ writes something non-deterministic or environment-dependent).
 | 0x50/0x52 | s_def_resuid/gid | 0 / 0 |
 | 0x54/0x58 | s_first_ino / s_inode_size | 11 / 256 |
 | 0x5A | s_block_group_nr | 0 primary; group # in backups |
-| 0x5C/0x60/0x64 | feature compat/incompat/ro | 0x2C / 0x242 / 0x44B |
+| 0x5C/0x60/0x64 | feature compat/incompat/ro | 0x2C / 0x242 / 0x46B |
 | 0x68/0x78 | s_uuid / s_volume_name | options |
 | 0x88 | s_last_mounted | zeros |
 | 0xC8/0xCC/0xCD | s_algorithm_usage_bitmap / s_prealloc_* | 0 / 0 / 0 |
@@ -417,8 +460,12 @@ extra_isize, 0x82 **checksum_hi**, 0x84/0x88/0x8C ctime/mtime/atime_extra,
   root, 8 = journal (§15), 11 = lost+found: mode 0o40700 root:root, 4
   blocks (16 KiB) — block 0 a normal empty-dir block with "."/"..",
   blocks 1–3 "empty" dirent blocks (§11) [verified].
-- Directory `i_links_count = 2 + subdirectory count`; regular files =
-  hardlink count; root counts itself.
+- Directory `i_links_count = 2 + subdirectory count`, **unless** that
+  exceeds 65,000 (EXT4_LINK_MAX): then store `i_links_count = 1`, the
+  dir_nlink convention for "uncounted" (kernel and e2fsck accept nlink 1
+  on directories when the ro_compat bit is set). Regular files: hardlink
+  count, hard error above 65,000 (dir_nlink does not cover files). Root
+  counts itself.
 
 ## 10. Extent trees
 
@@ -460,12 +507,19 @@ extra_isize, 0x82 **checksum_hi**, 0x84/0x88/0x8C ctime/mtime/atime_extra,
   in **declaration order**, greedy first-fit into successive blocks (an
   entry never splits). An "empty" block (lost+found padding) is a single
   unused dirent `{inode 0, rec_len 4084, file_type 0}` + tail [verified].
-- A directory stays linear iff everything fits in **one block**; otherwise
-  it is built as htree (§12). This matches what the mke2fs+e2fsck toolchain
-  produces ([verified]: `mke2fs -d` itself leaves even 120k-entry
+- **Linear/htree threshold — the oracle's exact rule, adopted verbatim**
+  (ADR-5): a directory stays linear iff the sum of its entry records
+  (`Σ align4(8 + name_len)` over real entries, excluding "."/"..") is
+  **< blocksize − 24** (4072). That is e2fsck 1.47.4 `rehash.c`'s
+  compression test, [verified] empirically at the boundary: 254 16-byte
+  entries (4064 B) → 2-block *linear*; 255 (4080 B) → htree. So linear
+  directories occupy 1 block, or exactly 2 in the narrow window where
+  entries exceed block 0's dot-reduced capacity but sit under the
+  threshold. Anything at/over the threshold is built as htree (§12).
+  (Background [verified]: `mke2fs -d` itself leaves even 120k-entry
   directories linear — htree-at-mkfs is produced by `e2fsck -fD`, whose
-  output is our layout oracle; ADR-5. Multi-block linear dirs are legal but
-  regress in-guest lookups, and dir_index is a hard requirement here).
+  output is our layout oracle. dir_index is a hard requirement here, so
+  linear-only is not a fallback.)
 
 ## 12. Directories — htree
 
@@ -497,13 +551,15 @@ Verified against `e2fsck -fD`-built trees (1-level, 300 entries; 2-level,
 - **Deterministic bulk build** (ADR-5): hash all entries; sort by
   `(hash, minor, declaration index)`; pack leaves to 100% fill in that
   order (entries inside a leaf stay in that sorted order — deterministic;
-  [verified] e2fsck -D also emits hash-sorted leaves); dx entry i carries
+  [verified] e2fsck -D also emits hash-sorted leaves, though it packs to
+  80% — `htree_slack_percentage` 20 default; our 100% fill is a recorded
+  deviation, §18); dx entry i carries
   the first hash of leaf i; if a leaf's first hash equals the previous
   leaf's last hash, set the collision-continuation bit (`hash | 1`) —
   same-hash runs must never be split *between* leaves when avoidable (split
   only if a single hash value exceeds one leaf's capacity, which the
-  collision bit handles). "." and ".." exist only in dx_root. If the
-  entry set fits one block → linear instead (§11).
+  collision bit handles). "." and ".." exist only in dx_root. Below the
+  §11 threshold → linear instead.
 - `i_size` covers all htree blocks; `EXT4_INDEX_FL` set; every block of the
   directory is covered by its extent tree as usual.
 
@@ -636,10 +692,17 @@ size before declaring anything.
 
 ## 18. Deviations from mke2fs (deliberate, all fsck-clean)
 
-1. **htree built eagerly at mkfs time** for any directory > 1 block —
-   stock `mke2fs -d` leaves all directories linear (verified, contrary to
-   folklore); our layout oracle is `e2fsck -fD` output, and dir_index is a
-   product requirement.
+1. **htree built eagerly at mkfs time** for any directory at/over the
+   §11 threshold — stock `mke2fs -d` leaves all directories linear
+   (verified, contrary to folklore); our layout oracle is `e2fsck -fD`
+   output (whose threshold we adopt exactly), and dir_index is a product
+   requirement.
+1a. **htree leaves packed to 100% fill** — `e2fsck -fD` leaves 20% slack
+   (`htree_slack_percentage`) for future kernel inserts; our images are
+   effectively immutable rootfs content, so slack is pure waste (a
+   first-insert leaf split at runtime is the kernel's normal path).
+   Structural tests assert our invariants + fsck/kernel oracles, not
+   byte-parity with `-fD` layouts.
 2. **Journal placement**: immediately after flex-0 metadata, not
    mid-device (mke2fs's placement optimizes spinning-disk seeks; ours
    optimizes a dense metadata prefix for streaming).
@@ -661,7 +724,8 @@ size before declaring anything.
 Structural identities we deliberately share with mke2fs: flex packing
 shape, ipg rounding, journal size tiers, overhead accounting, uninit-csum
 conventions, reserved-inode layout, lost+found sizing (4 blocks), empty
-featureless journal.
+featureless journal, the dir_nlink feature (a stock mke2fs default), and
+e2fsck's linear/htree threshold.
 
 ## 19. Verification plan & acceptance gates
 
@@ -690,11 +754,28 @@ Writer gates (phases 3+):
 6. `CheckingSink`: exactly-once coverage of [0, image_len), finality,
    metadata-before-data, ascending data offsets.
 7. proptest namespaces (nested dirs, name edge cases, hardlink webs, size
-   distributions incl. 0-byte and extent-boundary files, hole maps) ⇒
+   distributions incl. 0-byte and extent-boundary files, hole maps, and
+   whiteout patterns: recursive `remove` of populated subtrees, remove +
+   re-add under the same name, hardlinks surviving subtree removal) ⇒
    build ⇒ fsck + reader round-trip.
 8. Unit tests per module against `testdata/vectors/` blobs.
 9. CI from the first Rust commit: Linux lane (full, incl. loop mounts),
    macOS lane (everything except mounts; e2fsprogs via brew).
+10. **Performance gate** (phase 5, then permanent): two committed
+   hyperfine benchmarks — (a) ~120k-file small-file tree
+   (node_modules-like), (b) ~4 GiB tree containing multi-GiB files — must
+   beat `mke2fs -F -t ext4 -d <tree>` wall-clock on the Linux CI runner
+   class, with numbers reported in the README. A regression that loses to
+   mke2fs fails CI; the goal in §1 is enforced, not aspirational.
+
+**Oracle pinning**: all [verified] claims and the differential matrix are
+against **e2fsprogs 1.47.4**; CI pins that exact version (brew pin on
+macOS, built-from-tag on Linux — distro drift must not silently change the
+oracle). The fsck gate additionally runs an **older vintage, e2fsck
+1.46.x**, on every generated image — the public crate's output must be
+clean under more than one fsck generation. The mount lane records its
+kernel (ubuntu-24.04 runners, linux 6.8.x at time of writing) in the
+workflow and README.
 
 Notes: `e2fsck -b <backup>` is *not* a gate (it reports differences even
 on pristine mke2fs images); backup correctness is covered by byte-equality
@@ -720,11 +801,12 @@ clobbered (recovery drill, Linux CI).
   (uniformity; real bitmaps are one constant block per free group).
 - **ADR-4 Extent trees: bulk bottom-up, 100% fill.** No incremental-split
   replay; fsck doesn't check fill factor; deterministic and simplest.
-- **ADR-5 htree threshold & build.** >1 block ⇒ htree (e2fsck -fD
-  behavior); bulk build with hash-sorted, fully-packed leaves; collision
-  bit on equal-hash leaf boundaries. Linear fallback is not needed
-  (dir_index is a requirement), but the one-block linear case stays linear
-  like the toolchain does.
+- **ADR-5 htree threshold & build.** Threshold = e2fsck `rehash.c`'s rule,
+  adopted verbatim (entry bytes < blocksize−24 ⇒ linear, even when that
+  means a 2-block linear dir) so there is no divergence window at the
+  boundary; bulk build with hash-sorted leaves at 100% fill (oracle uses
+  80% — deviation §18.1a); collision bit on equal-hash leaf boundaries.
+  Linear fallback is not needed (dir_index is a requirement).
 - **ADR-6 Hash signedness fixed: signed (s_flags 0x1).** Matches x86-64
   and Apple-silicon e2fsprogs output; platform char signedness must never
   leak (arm64-Linux mke2fs would write unsigned — we are constant).
@@ -745,6 +827,7 @@ clobbered (recovery drill, Linux CI).
 | question | resolution | evidence |
 |---|---|---|
 | Does mke2fs -d build htree? | **No** — even 120k-entry dirs are linear; `e2fsck -fD` is the htree authority | debugfs `stat`/`htree` on ref512/ref8g |
+| e2fsck -fD linear/htree threshold | linear iff entry bytes < blocksize−24 (254×16 B entries → 2-block linear; 255 → htree), leaves packed with 20% slack (`htree_slack_percentage`) | boundary bisect at n=250..260 + rehash.c v1.47.4 |
 | dx_root/node limits | 507 / 510 with metadata_csum | htree dumps + formula match |
 | dx checksum coverage | count-covered entries + dt_reserved + zeroed csum word | brute-forced variants; exact match |
 | half_md4 details | signed str2hashbuf, seed = s_hash_seed words LE, hash = buf[1]&~1, minor = buf[2] | 4 debugfs vectors + 300 + 120k leaf names in range |
