@@ -29,7 +29,10 @@ curl -fsSL --http1.1 --retry 8 --retry-all-errors --retry-delay 5 \
 tar -xzf "$SRC/e2fsprogs.tar.gz" -C "$SRC"
 
 cd "$SRC/e2fsprogs-$VER"
-./configure --prefix="$PREFIX" --disable-nls --disable-fuse2fs >/dev/null
+# =no on the system-integration dirs keeps `make install` inside the
+# prefix (otherwise install-udev writes to /usr/lib/udev and fails).
+./configure --prefix="$PREFIX" --disable-nls --disable-fuse2fs \
+    --with-udev-rules-dir=no --with-systemd-unit-dir=no --with-crond-dir=no >/dev/null
 make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" >/dev/null
 make install >/dev/null
 echo "installed e2fsprogs $VER to $PREFIX"
