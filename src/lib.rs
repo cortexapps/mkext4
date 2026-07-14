@@ -23,7 +23,10 @@ pub mod reader;
 pub mod sink;
 pub mod spec;
 
-pub use build::{Features, FsBuilder, InodeCount, InodeHandle, Layout, Meta, Options, ROOT};
+pub use build::{
+    Features, FsBuilder, InodeCount, InodeHandle, Layout, Meta, Options, SparseSeg, SpecialKind,
+    ROOT,
+};
 pub use sink::RegionSink;
 
 mod le;

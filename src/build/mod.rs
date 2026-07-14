@@ -5,13 +5,15 @@
 //! names in a single byte arena, children as per-directory vectors of
 //! (name-ref, slot) — no per-entry heap strings.
 
+mod htree;
 mod seal;
 mod writer;
+mod xattr_build;
 
 pub use seal::Layout;
 pub use writer::{ImageWriter, Summary};
 
-use crate::spec::LINK_MAX;
+use crate::spec::{self, LINK_MAX};
 use crate::{Error, Result};
 
 /// Feature selection. Only one profile exists today; the type keeps the
@@ -122,6 +124,53 @@ pub(crate) enum NodeKind {
     File {
         size: u64,
     },
+    Sparse {
+        /// Data segments as (byte offset, byte length), sorted, disjoint.
+        data_segs: Vec<(u64, u64)>,
+        /// Total logical size (data + holes).
+        size: u64,
+    },
+    Symlink {
+        target: Vec<u8>,
+    },
+    Special {
+        /// Dirent file_type (CHR / BLK / FIFO / SOCK).
+        ftype: u8,
+        major: u32,
+        minor: u32,
+    },
+}
+
+/// One segment of a sparse file declaration, in logical order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SparseSeg {
+    /// Bytes supplied by `fill`.
+    Data(u64),
+    /// Absent blocks; read back as zeros; never filled.
+    Hole(u64),
+}
+
+/// Kind of special inode for [`FsBuilder::mknod`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialKind {
+    /// Character device.
+    Char {
+        /// Major number (≤ 4095).
+        major: u32,
+        /// Minor number (≤ 1048575).
+        minor: u32,
+    },
+    /// Block device.
+    Block {
+        /// Major number (≤ 4095).
+        major: u32,
+        /// Minor number (≤ 1048575).
+        minor: u32,
+    },
+    /// Named pipe.
+    Fifo,
+    /// Unix socket.
+    Socket,
 }
 
 #[derive(Debug)]
@@ -138,6 +187,9 @@ pub struct FsBuilder {
     pub(crate) opts: Options,
     pub(crate) nodes: Vec<Node>,
     pub(crate) names: Vec<u8>,
+    /// xattrs per slot: (name_index, name-after-prefix, value), few
+    /// nodes have any, so a side map beats a per-node field.
+    pub(crate) xattrs: std::collections::BTreeMap<u32, Vec<(u8, Vec<u8>, Vec<u8>)>>,
     /// Total declared file bytes of all currently-linked files (upper
     /// bound; recomputed exactly at seal).
     declared_bytes: u64,
@@ -170,6 +222,7 @@ impl FsBuilder {
                 nlink: 1,
             }],
             names: Vec::new(),
+            xattrs: std::collections::BTreeMap::new(),
             declared_bytes: 0,
         })
     }
@@ -261,13 +314,158 @@ impl FsBuilder {
         Ok(InodeHandle(slot))
     }
 
+    /// Declare a sparse file from a segment map. Every segment except the
+    /// last must be a multiple of 4096 bytes (holes are whole absent
+    /// blocks). `fill` later supplies only the `Data` bytes, in order.
+    pub fn file_sparse(
+        &mut self,
+        parent: InodeHandle,
+        name: &str,
+        meta: Meta,
+        segments: &[SparseSeg],
+    ) -> Result<InodeHandle> {
+        let mut data_segs = Vec::new();
+        let mut offset = 0u64;
+        for (i, seg) in segments.iter().enumerate() {
+            let len = match *seg {
+                SparseSeg::Data(l) => l,
+                SparseSeg::Hole(l) => l,
+            };
+            if len == 0 {
+                return Err(Error::Unsupported("zero-length sparse segment".into()));
+            }
+            if i + 1 != segments.len() && len % 4096 != 0 {
+                return Err(Error::Unsupported(
+                    "sparse segments must be block-aligned (except the last)".into(),
+                ));
+            }
+            if let SparseSeg::Data(l) = *seg {
+                // Merge adjacent data segments for a canonical map.
+                match data_segs.last_mut() {
+                    Some((o, dl)) if *o + *dl == offset => *dl += l,
+                    _ => data_segs.push((offset, l)),
+                }
+            }
+            offset += len;
+        }
+        let size = offset;
+        let slot = self.nodes.len() as u32;
+        self.add_entry(parent, name, slot)?;
+        self.nodes.push(Node {
+            kind: NodeKind::Sparse { data_segs, size },
+            meta,
+            nlink: 1,
+        });
+        self.declared_bytes += size;
+        Ok(InodeHandle(slot))
+    }
+
+    /// Declare a symlink. Targets of ≤ 59 bytes are stored inline (fast
+    /// symlink); longer ones occupy one block. Max 4095 bytes.
+    pub fn symlink(
+        &mut self,
+        parent: InodeHandle,
+        name: &str,
+        target: &str,
+        meta: Meta,
+    ) -> Result<InodeHandle> {
+        let t = target.as_bytes();
+        if t.is_empty() || t.len() > 4095 || t.contains(&0) {
+            return Err(Error::Unsupported(format!(
+                "symlink target length {} (must be 1..=4095, no NUL)",
+                t.len()
+            )));
+        }
+        let slot = self.nodes.len() as u32;
+        self.add_entry(parent, name, slot)?;
+        self.nodes.push(Node {
+            kind: NodeKind::Symlink { target: t.to_vec() },
+            meta,
+            nlink: 1,
+        });
+        Ok(InodeHandle(slot))
+    }
+
+    /// Declare a device node, FIFO, or socket.
+    pub fn mknod(
+        &mut self,
+        parent: InodeHandle,
+        name: &str,
+        meta: Meta,
+        kind: SpecialKind,
+    ) -> Result<InodeHandle> {
+        let (ftype, major, minor) = match kind {
+            SpecialKind::Char { major, minor } => (spec::file_type::CHR, major, minor),
+            SpecialKind::Block { major, minor } => (spec::file_type::BLK, major, minor),
+            SpecialKind::Fifo => (spec::file_type::FIFO, 0, 0),
+            SpecialKind::Socket => (spec::file_type::SOCK, 0, 0),
+        };
+        if major > 0xFFF || minor > 0xF_FFFF {
+            return Err(Error::Unsupported(format!(
+                "device numbers ({major}, {minor}) out of dev_t range"
+            )));
+        }
+        let slot = self.nodes.len() as u32;
+        self.add_entry(parent, name, slot)?;
+        self.nodes.push(Node {
+            kind: NodeKind::Special {
+                ftype,
+                major,
+                minor,
+            },
+            meta,
+            nlink: 1,
+        });
+        Ok(InodeHandle(slot))
+    }
+
+    /// Set an extended attribute on any live handle (including [`ROOT`]).
+    /// Attributes are canonically sorted on disk, so declaration order
+    /// does not affect the output; setting the same name again replaces
+    /// the value.
+    pub fn set_xattr(&mut self, handle: InodeHandle, name: &str, value: &[u8]) -> Result<()> {
+        if self.nodes.get(handle.0 as usize).is_none() {
+            return Err(Error::Unsupported("invalid handle".into()));
+        }
+        let (index, suffix): (u8, &str) = if let Some(s) = name.strip_prefix("user.") {
+            (1, s)
+        } else if name == "system.posix_acl_access" {
+            (2, "")
+        } else if name == "system.posix_acl_default" {
+            (3, "")
+        } else if let Some(s) = name.strip_prefix("trusted.") {
+            (4, s)
+        } else if let Some(s) = name.strip_prefix("security.") {
+            (6, s)
+        } else if let Some(s) = name.strip_prefix("system.") {
+            (7, s)
+        } else {
+            return Err(Error::Unsupported(format!(
+                "xattr name {name:?} has no recognized namespace"
+            )));
+        };
+        if suffix.len() > 255 {
+            return Err(Error::Unsupported("xattr name too long".into()));
+        }
+        let list = self.xattrs.entry(handle.0).or_default();
+        if let Some(e) = list
+            .iter_mut()
+            .find(|(i, n, _)| *i == index && n == suffix.as_bytes())
+        {
+            e.2 = value.to_vec();
+        } else {
+            list.push((index, suffix.as_bytes().to_vec(), value.to_vec()));
+        }
+        Ok(())
+    }
+
     /// Add another name for an existing file (shared inode).
     pub fn hardlink(&mut self, parent: InodeHandle, name: &str, target: InodeHandle) -> Result<()> {
         match self.nodes.get(target.0 as usize).map(|n| &n.kind) {
-            Some(NodeKind::File { .. }) => {}
             Some(NodeKind::Dir { .. }) => {
                 return Err(Error::Unsupported("hardlink to a directory".into()))
             }
+            Some(_) => {}
             None => return Err(Error::Unsupported("invalid handle".into())),
         }
         if self.nodes[target.0 as usize].nlink >= LINK_MAX {
@@ -310,16 +508,23 @@ impl FsBuilder {
             children[idx].2 = true;
         }
         match &self.nodes[child as usize].kind {
-            NodeKind::File { size } => {
-                let size = *size;
-                self.nodes[child as usize].nlink -= 1;
-                if self.nodes[child as usize].nlink == 0 {
-                    self.declared_bytes -= size;
-                }
-            }
             NodeKind::Dir { .. } => self.remove_subtree(child),
+            _ => self.unlink(child),
         }
         Ok(())
+    }
+
+    /// Drop one link of a non-directory node.
+    fn unlink(&mut self, slot: u32) {
+        let bytes = match &self.nodes[slot as usize].kind {
+            NodeKind::File { size } => *size,
+            NodeKind::Sparse { size, .. } => *size,
+            _ => 0,
+        };
+        self.nodes[slot as usize].nlink -= 1;
+        if self.nodes[slot as usize].nlink == 0 {
+            self.declared_bytes -= bytes;
+        }
     }
 
     fn remove_subtree(&mut self, dir_slot: u32) {
@@ -338,14 +543,8 @@ impl FsBuilder {
                 continue;
             }
             match &self.nodes[child as usize].kind {
-                NodeKind::File { size } => {
-                    let size = *size;
-                    self.nodes[child as usize].nlink -= 1;
-                    if self.nodes[child as usize].nlink == 0 {
-                        self.declared_bytes -= size;
-                    }
-                }
                 NodeKind::Dir { .. } => self.remove_subtree(child),
+                _ => self.unlink(child),
             }
         }
     }

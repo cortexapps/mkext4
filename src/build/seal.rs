@@ -101,22 +101,49 @@ impl Layout {
     }
 }
 
-/// Build the extent structures for a run list. Allocates tree blocks
-/// from `alloc` when more than 4 extents are needed and pushes their
-/// rendered bytes as segments.
+/// The extent plan of a file with no mapped blocks: a valid header with
+/// zero entries (the verified empty-file shape).
+fn empty_extent_plan() -> ExtentPlan {
+    let mut root = [0u8; 60];
+    ExtentHeader {
+        entries: 0,
+        max: 4,
+        depth: 0,
+        generation: 0,
+    }
+    .encode(&mut root);
+    ExtentPlan {
+        extents: Vec::new(),
+        root,
+        tree_blocks: 0,
+    }
+}
+
+/// Attach dense logical block numbers to a run list (non-sparse files).
+fn with_logicals(runs: &[Run]) -> Vec<(u32, Run)> {
+    let mut out = Vec::with_capacity(runs.len());
+    let mut logical = 0u32;
+    for r in runs {
+        out.push((logical, *r));
+        logical += r.len as u32;
+    }
+    out
+}
+
+/// Build the extent structures for (logical, physical-run) pairs.
+/// Allocates tree blocks from `alloc` when more than 4 extents are
+/// needed and pushes their rendered bytes as segments.
 fn plan_extents(
-    runs: &[Run],
+    pairs: &[(u32, Run)],
     ino: u32,
     fs_seed: u32,
     alloc: &mut Allocator,
     segments: &mut Vec<Segment>,
 ) -> Result<ExtentPlan> {
-    let mut extents: Vec<(u32, u64, u32)> = Vec::with_capacity(runs.len());
-    let mut logical = 0u32;
-    for r in runs {
+    let mut extents: Vec<(u32, u64, u32)> = Vec::with_capacity(pairs.len());
+    for &(logical, r) in pairs {
         debug_assert!(r.len <= MAX_EXTENT);
         extents.push((logical, r.start, r.len as u32));
-        logical += r.len as u32;
     }
     let mut plan = ExtentPlan {
         extents,
@@ -292,6 +319,26 @@ struct InodeRender {
     nlink: u32,
     flags: u32,
     block: [u8; 60],
+    /// xattr block address (0 = none). Adds 8 to i_blocks.
+    file_acl: u64,
+    /// Rendered in-inode xattr area (empty = none).
+    ibody: Vec<u8>,
+}
+
+impl InodeRender {
+    fn plain(meta: Meta, ftype: u8, nlink: u32) -> InodeRender {
+        InodeRender {
+            meta,
+            ftype,
+            size: 0,
+            blocks512: 0,
+            nlink,
+            flags: 0,
+            block: [0; 60],
+            file_acl: 0,
+            ibody: Vec::new(),
+        }
+    }
 }
 
 fn render_inode(fs_seed: u32, ino: u32, r: &InodeRender) -> [u8; 256] {
@@ -332,7 +379,7 @@ fn render_inode(fs_seed: u32, ino: u32, r: &InodeRender) -> [u8; 256] {
         version: 0,
         block: r.block,
         generation: 0,
-        file_acl: 0,
+        file_acl: r.file_acl,
         extra_isize: 32,
         checksum: 0,
         ctime_extra,
@@ -341,7 +388,7 @@ fn render_inode(fs_seed: u32, ino: u32, r: &InodeRender) -> [u8; 256] {
         crtime,
         crtime_extra,
         projid: 0,
-        ibody: Vec::new(),
+        ibody: r.ibody.clone(),
     };
     let mut buf = [0u8; 256];
     inode.encode(&mut buf);
@@ -467,24 +514,34 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
         .take(u64::from(geo.journal_blocks), MAX_EXTENT)
         .ok_or_else(err_full)?;
     let journal_plan = plan_extents(
-        &journal_runs,
+        &with_logicals(&journal_runs),
         JOURNAL_INO,
         fs_seed,
         &mut alloc,
         &mut segments,
     )?;
 
-    // --- directory content ------------------------------------------------
-    // Rendered blocks per dir slot (checksummed once ino is known), plus
-    // lost+found.
-    let mut dir_blocks: Vec<(u32, Vec<Run>, ExtentPlan, u64)> = Vec::new(); // (slot, runs, plan, nblocks)
+    // --- namespace metadata: per inode, in inode order ----------------------
+    // For each inode: xattr block, then directory / slow-symlink content.
+    // (slot, runs, plan, nblocks, is_htree)
+    let mut dir_blocks: Vec<(u32, Vec<Run>, ExtentPlan, u64, bool)> = Vec::new();
     let mut dir_rendered: Vec<(u64, Vec<u8>)> = Vec::new(); // (block, bytes)
+                                                            // Per slot: (i_file_acl block or 0, rendered ibody area).
+    let mut xattr_out: Vec<(u64, Vec<u8>)> = vec![(0, Vec::new()); b.nodes.len()];
+    // Per slot: slow-symlink extent plan.
+    let mut symlink_plans: Vec<Option<ExtentPlan>> = (0..b.nodes.len()).map(|_| None).collect();
 
     // lost+found first (inode 11): block 0 dots, 3 empty blocks.
     let lf_runs = alloc
         .take(LOST_FOUND_BLOCKS, MAX_EXTENT)
         .ok_or_else(err_full)?;
-    let lf_plan = plan_extents(&lf_runs, LOST_FOUND_INO, fs_seed, &mut alloc, &mut segments)?;
+    let lf_plan = plan_extents(
+        &with_logicals(&lf_runs),
+        LOST_FOUND_INO,
+        fs_seed,
+        &mut alloc,
+        &mut segments,
+    )?;
     {
         let entries = vec![
             (b".".to_vec(), LOST_FOUND_INO, file_type::DIR),
@@ -503,54 +560,112 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
         }
     }
 
-    // Namespace directories, in inode order (root first, then slots).
-    let dir_slots: Vec<u32> = std::iter::once(0u32)
-        .chain((1..b.nodes.len() as u32).filter(|&s| {
-            slot_ino[s as usize] != 0 && matches!(b.nodes[s as usize].kind, NodeKind::Dir { .. })
-        }))
-        .collect();
-    for &slot in &dir_slots {
+    for slot in 0..b.nodes.len() as u32 {
         let ino = slot_ino[slot as usize];
-        let parent_ino = if slot == 0 {
-            ROOT_INO
-        } else {
-            find_parent(&b, slot, &slot_ino)
-        };
-        let NodeKind::Dir { children } = &b.nodes[slot as usize].kind else {
-            unreachable!()
-        };
-        let mut entries: Vec<(Vec<u8>, u32, u8)> = Vec::with_capacity(children.len() + 2);
-        entries.push((b".".to_vec(), ino, file_type::DIR));
-        entries.push((b"..".to_vec(), parent_ino, file_type::DIR));
-        if slot == 0 {
-            entries.push((b"lost+found".to_vec(), LOST_FOUND_INO, file_type::DIR));
+        if ino == 0 {
+            continue;
         }
-        for &(nref, child, dead) in children {
-            if dead || slot_ino[child as usize] == 0 {
-                continue;
+
+        // xattrs first (DESIGN.md §5 ordering).
+        if let Some(attrs) = b.xattrs.get(&slot) {
+            let plan = super::xattr_build::plan(attrs.clone())?;
+            let mut acl = 0u64;
+            if !plan.block_attrs.is_empty() {
+                let block = alloc.take_one().ok_or_else(err_full)?;
+                let bytes = super::xattr_build::render_block(&plan.block_attrs, fs_seed, block);
+                segments.push(Segment {
+                    block,
+                    len: 1,
+                    src: SegSrc::Bytes(bytes),
+                });
+                acl = block;
             }
-            let ft = match b.nodes[child as usize].kind {
-                NodeKind::Dir { .. } => file_type::DIR,
-                NodeKind::File { .. } => file_type::REG,
-            };
-            entries.push((b.name(nref).to_vec(), slot_ino[child as usize], ft));
+            xattr_out[slot as usize] = (acl, plan.ibody);
         }
-        let mut blocks = pack_dirents(&entries, false);
-        let runs = alloc
-            .take(blocks.len() as u64, MAX_EXTENT)
-            .ok_or_else(err_full)?;
-        let plan = plan_extents(&runs, ino, fs_seed, &mut alloc, &mut segments)?;
-        let seed = csum::inode_seed(fs_seed, ino, 0);
-        let mut phys = expand_runs(&runs);
-        for (buf, p) in blocks.iter_mut().zip(phys.drain(..)) {
-            let c = csum::dirent_block(seed, buf);
-            crate::le::put_u32(buf, BLOCK_SIZE - 4, c);
-            dir_rendered.push((p, std::mem::take(buf)));
+
+        match &b.nodes[slot as usize].kind {
+            NodeKind::Dir { children } => {
+                let parent_ino = if slot == 0 {
+                    ROOT_INO
+                } else {
+                    find_parent(&b, slot, &slot_ino)
+                };
+                let mut entries: Vec<(Vec<u8>, u32, u8)> = Vec::with_capacity(children.len() + 1);
+                if slot == 0 {
+                    entries.push((b"lost+found".to_vec(), LOST_FOUND_INO, file_type::DIR));
+                }
+                for &(nref, child, dead) in children {
+                    if dead || slot_ino[child as usize] == 0 {
+                        continue;
+                    }
+                    let ft = match b.nodes[child as usize].kind {
+                        NodeKind::Dir { .. } => file_type::DIR,
+                        NodeKind::File { .. } | NodeKind::Sparse { .. } => file_type::REG,
+                        NodeKind::Symlink { .. } => file_type::SYMLINK,
+                        NodeKind::Special { ftype, .. } => ftype,
+                    };
+                    entries.push((b.name(nref).to_vec(), slot_ino[child as usize], ft));
+                }
+
+                let is_htree = super::htree::needs_htree(&entries);
+                let blocks: Vec<Vec<u8>> = if is_htree {
+                    super::htree::build(ino, parent_ino, &entries, &b.opts.hash_seed, fs_seed)?
+                        .blocks
+                } else {
+                    // Linear: "." and ".." lead, then declaration order.
+                    let mut with_dots: Vec<(Vec<u8>, u32, u8)> =
+                        Vec::with_capacity(entries.len() + 2);
+                    with_dots.push((b".".to_vec(), ino, file_type::DIR));
+                    with_dots.push((b"..".to_vec(), parent_ino, file_type::DIR));
+                    with_dots.extend(entries);
+                    let mut blocks = pack_dirents(&with_dots, false);
+                    let seed = csum::inode_seed(fs_seed, ino, 0);
+                    for buf in &mut blocks {
+                        let c = csum::dirent_block(seed, buf);
+                        crate::le::put_u32(buf, BLOCK_SIZE - 4, c);
+                    }
+                    blocks
+                };
+
+                let nblocks = blocks.len() as u64;
+                let runs = alloc.take(nblocks, MAX_EXTENT).ok_or_else(err_full)?;
+                let plan = plan_extents(
+                    &with_logicals(&runs),
+                    ino,
+                    fs_seed,
+                    &mut alloc,
+                    &mut segments,
+                )?;
+                let mut phys = expand_runs(&runs);
+                for (buf, p) in blocks.into_iter().zip(phys.drain(..)) {
+                    dir_rendered.push((p, buf));
+                }
+                dir_blocks.push((slot, runs, plan, nblocks, is_htree));
+            }
+            NodeKind::Symlink { target } if target.len() > 59 => {
+                let block = alloc.take_one().ok_or_else(err_full)?;
+                let mut bytes = vec![0u8; BLOCK_SIZE];
+                bytes[..target.len()].copy_from_slice(target);
+                segments.push(Segment {
+                    block,
+                    len: 1,
+                    src: SegSrc::Bytes(bytes),
+                });
+                let run = [(
+                    0u32,
+                    Run {
+                        start: block,
+                        len: 1,
+                    },
+                )];
+                symlink_plans[slot as usize] =
+                    Some(plan_extents(&run, ino, fs_seed, &mut alloc, &mut segments)?);
+            }
+            _ => {}
         }
-        dir_blocks.push((slot, runs, plan, blocks.len() as u64));
     }
 
-    // --- file data --------------------------------------------------------
+    // --- file data ----------------------------------------------------------
     let mut file_runs: Vec<(Vec<Run>, u64)> = vec![(Vec::new(), 0); b.nodes.len()];
     let mut file_plans: Vec<Option<(ExtentPlan, u64)>> = (0..b.nodes.len()).map(|_| None).collect();
     let mut data_runs: Vec<Run> = Vec::new();
@@ -559,14 +674,32 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
         if ino == 0 {
             continue;
         }
-        if let NodeKind::File { size } = node.kind {
-            let nblocks = size.div_ceil(BLOCK_SIZE as u64);
-            let runs = alloc.take(nblocks, MAX_EXTENT).ok_or_else(err_full)?;
-            let plan = plan_extents(&runs, ino, fs_seed, &mut alloc, &mut segments)?;
-            data_runs.extend(runs.iter().copied());
-            file_runs[slot] = (runs, size);
-            file_plans[slot] = Some((plan, nblocks));
+        // (logical offset, byte length) data segments; dense for regular
+        // files, gapped for sparse ones.
+        let segs: Vec<(u64, u64)> = match &node.kind {
+            NodeKind::File { size } if *size > 0 => vec![(0, *size)],
+            NodeKind::Sparse { data_segs, .. } => data_segs.clone(),
+            _ => continue,
+        };
+        let mut pairs: Vec<(u32, Run)> = Vec::new();
+        let mut runs: Vec<Run> = Vec::new();
+        let mut data_bytes = 0u64;
+        for (offset, len) in &segs {
+            let nblocks = len.div_ceil(BLOCK_SIZE as u64);
+            let seg_runs = alloc.take(nblocks, MAX_EXTENT).ok_or_else(err_full)?;
+            let mut logical = (offset / BLOCK_SIZE as u64) as u32;
+            for r in &seg_runs {
+                pairs.push((logical, *r));
+                logical += r.len as u32;
+            }
+            runs.extend(seg_runs);
+            data_bytes += len;
         }
+        let alloc_blocks: u64 = runs.iter().map(|r| r.len).sum();
+        let plan = plan_extents(&pairs, ino, fs_seed, &mut alloc, &mut segments)?;
+        data_runs.extend(runs.iter().copied());
+        file_runs[slot] = (runs, data_bytes);
+        file_plans[slot] = Some((plan, alloc_blocks));
     }
 
     // --- block bitmap ----------------------------------------------------
@@ -632,6 +765,8 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
                 nlink: 1,
                 flags: iflags::EXTENTS,
                 block: journal_plan.root,
+                file_acl: 0,
+                ibody: Vec::new(),
             },
         ),
     );
@@ -651,6 +786,8 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
                 nlink: 2,
                 flags: iflags::EXTENTS,
                 block: lf_plan.root,
+                file_acl: 0,
+                ibody: Vec::new(),
             },
         ),
     );
@@ -673,11 +810,14 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
         }
     }
 
-    for (slot, runs, plan, nblocks) in &dir_blocks {
+    // Directories: htree dirs get INDEX_FL.
+    for (slot, runs, plan, nblocks, is_htree) in &dir_blocks {
         let slot = *slot as usize;
         let ino = slot_ino[slot];
         let extra_root_link = if slot == 0 { 1 } else { 0 }; // lost+found's ".."
         let _ = runs;
+        let (file_acl, ibody) = xattr_out[slot].clone();
+        let flags = iflags::EXTENTS | if *is_htree { iflags::INDEX } else { 0 };
         inodes.insert(
             ino,
             render_inode(
@@ -687,38 +827,90 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
                     meta: b.nodes[slot].meta,
                     ftype: file_type::DIR,
                     size: nblocks * BLOCK_SIZE as u64,
-                    blocks512: nblocks * 8 + plan.tree_blocks,
+                    blocks512: nblocks * 8 + plan.tree_blocks + if file_acl != 0 { 8 } else { 0 },
                     nlink: 2 + subdirs[slot] + extra_root_link,
-                    flags: iflags::EXTENTS,
+                    flags,
                     block: plan.root,
+                    file_acl,
+                    ibody,
                 },
             ),
         );
     }
+    // Files, sparse files, symlinks, specials.
     for (slot, node) in b.nodes.iter().enumerate() {
         let ino = slot_ino[slot];
         if ino == 0 {
             continue;
         }
-        if let NodeKind::File { size } = node.kind {
-            let (plan, nblocks) = file_plans[slot].as_ref().unwrap();
-            inodes.insert(
-                ino,
-                render_inode(
-                    fs_seed,
-                    ino,
-                    &InodeRender {
-                        meta: node.meta,
-                        ftype: file_type::REG,
-                        size,
-                        blocks512: nblocks * 8 + plan.tree_blocks,
-                        nlink: node.nlink,
-                        flags: iflags::EXTENTS,
-                        block: plan.root,
-                    },
-                ),
-            );
-        }
+        let (file_acl, ibody) = xattr_out[slot].clone();
+        let acl_512 = if file_acl != 0 { 8 } else { 0 };
+        let render = match &node.kind {
+            NodeKind::Dir { .. } => continue, // handled above
+            NodeKind::File { size } | NodeKind::Sparse { size, .. } => {
+                let empty = (empty_extent_plan(), 0u64);
+                let (plan, nblocks) = file_plans[slot].as_ref().unwrap_or(&empty);
+                InodeRender {
+                    size: *size,
+                    blocks512: nblocks * 8 + plan.tree_blocks + acl_512,
+                    flags: iflags::EXTENTS,
+                    block: plan.root,
+                    file_acl,
+                    ibody,
+                    ..InodeRender::plain(node.meta, file_type::REG, node.nlink)
+                }
+            }
+            NodeKind::Symlink { target } if target.len() <= 59 => {
+                let mut block = [0u8; 60];
+                block[..target.len()].copy_from_slice(target);
+                InodeRender {
+                    size: target.len() as u64,
+                    block,
+                    file_acl,
+                    ibody,
+                    blocks512: acl_512,
+                    ..InodeRender::plain(node.meta, file_type::SYMLINK, node.nlink)
+                }
+            }
+            NodeKind::Symlink { target } => {
+                let plan = symlink_plans[slot].as_ref().unwrap();
+                InodeRender {
+                    size: target.len() as u64,
+                    blocks512: 8 + plan.tree_blocks + acl_512,
+                    flags: iflags::EXTENTS,
+                    block: plan.root,
+                    file_acl,
+                    ibody,
+                    ..InodeRender::plain(node.meta, file_type::SYMLINK, node.nlink)
+                }
+            }
+            NodeKind::Special {
+                ftype,
+                major,
+                minor,
+            } => {
+                let mut block = [0u8; 60];
+                if *ftype == file_type::CHR || *ftype == file_type::BLK {
+                    if *major < 256 && *minor < 256 {
+                        crate::le::put_u32(&mut block, 0, (major << 8) | minor);
+                    } else {
+                        crate::le::put_u32(
+                            &mut block,
+                            4,
+                            (minor & 0xFF) | (major << 8) | ((minor & !0xFFu32) << 12),
+                        );
+                    }
+                }
+                InodeRender {
+                    block,
+                    file_acl,
+                    ibody,
+                    blocks512: acl_512,
+                    ..InodeRender::plain(node.meta, *ftype, node.nlink)
+                }
+            }
+        };
+        inodes.insert(ino, render_inode(fs_seed, ino, &render));
     }
 
     // --- group descriptors -------------------------------------------------

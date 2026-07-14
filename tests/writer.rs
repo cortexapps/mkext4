@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use streamext4::reader::Fs;
 use streamext4::sink::{CheckingSink, VecSink};
 use streamext4::spec;
-use streamext4::{Features, FsBuilder, InodeCount, Meta, Options, ROOT};
+use streamext4::{Features, FsBuilder, InodeCount, Meta, Options, SparseSeg, ROOT};
 
 const UUID: [u8; 16] = [
     0xd0, 0xd0, 0xca, 0xca, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
@@ -320,6 +320,236 @@ fn pattern_at(total: u64, seed: u64, offset: u64, len: usize) -> Vec<u8> {
     let mut out = vec![0u8; len];
     p.read_exact(&mut out).unwrap();
     out
+}
+
+#[test]
+fn full_feature_namespace() {
+    use streamext4::SpecialKind;
+    let size = 128 << 20;
+    let build = || {
+        let mut b = FsBuilder::new(options(size)).unwrap();
+        b.set_xattr(ROOT, "security.selinux", b"system_u:object_r:root_t:s0")
+            .unwrap();
+        // Symlinks at the fast/slow boundary.
+        b.symlink(ROOT, "sym_1", "b", meta(0o777)).unwrap();
+        b.symlink(ROOT, "sym_59", &"a".repeat(59), meta(0o777))
+            .unwrap();
+        b.symlink(ROOT, "sym_60", &"a".repeat(60), meta(0o777))
+            .unwrap();
+        b.symlink(ROOT, "sym_long", &"t/".repeat(120), meta(0o777))
+            .unwrap();
+        // Specials.
+        b.mknod(
+            ROOT,
+            "null",
+            meta(0o666),
+            SpecialKind::Char { major: 1, minor: 3 },
+        )
+        .unwrap();
+        b.mknod(
+            ROOT,
+            "bigdev",
+            meta(0o600),
+            SpecialKind::Block {
+                major: 254,
+                minor: 70000,
+            },
+        )
+        .unwrap();
+        b.mknod(ROOT, "fifo", meta(0o644), SpecialKind::Fifo)
+            .unwrap();
+        b.mknod(ROOT, "sock", meta(0o644), SpecialKind::Socket)
+            .unwrap();
+        // xattrs: ibody-only, spill-to-block, on a dir.
+        let f = b.file(ROOT, "attrs", meta(0o644), 10).unwrap();
+        b.set_xattr(f, "user.small", b"v").unwrap();
+        b.set_xattr(f, "user.big", &vec![0x42u8; 600]).unwrap();
+        b.set_xattr(f, "security.capability", &[1, 0, 0, 2, 0, 0, 0, 0])
+            .unwrap();
+        let d = b.mkdir(ROOT, "xdir", meta(0o755)).unwrap();
+        b.set_xattr(d, "user.on-a-dir", b"yes").unwrap();
+        // htree: 2000 entries is far past the threshold.
+        let big = b.mkdir(ROOT, "big", meta(0o755)).unwrap();
+        for i in 0..2000 {
+            b.file(big, &format!("node_{i:06}_padpadpad"), meta(0o644), 0)
+                .unwrap();
+        }
+        // Sparse: data / 1 GiB hole / data, partial tail.
+        let sp = b
+            .file_sparse(
+                ROOT,
+                "sparse",
+                meta(0o644),
+                &[
+                    SparseSeg::Data(8192),
+                    SparseSeg::Hole(1 << 30),
+                    SparseSeg::Data(5000),
+                ],
+            )
+            .unwrap();
+        let layout = b.seal().unwrap();
+        let mut sink = CheckingSink::new(VecSink::default());
+        let mut w = layout.writer(&mut sink).unwrap();
+        w.fill(f, &mut Pattern::new(10, 5)).unwrap();
+        w.fill(sp, &mut Pattern::new(8192 + 5000, 6)).unwrap();
+        w.finish().unwrap();
+        sink.finish(size).unwrap().buf.clone()
+    };
+    let image = build();
+    assert_eq!(build(), image, "full-feature build must be deterministic");
+    assert_fsck_clean(&image, "writer_features");
+
+    let fs = Fs::open(&image[..]).unwrap();
+    let issues = fs.verify().unwrap();
+    assert!(
+        issues.is_empty(),
+        "verify: {:?}",
+        &issues[..issues.len().min(5)]
+    );
+
+    // Symlinks.
+    for (path, len, fast) in [
+        ("/sym_1", 1usize, true),
+        ("/sym_59", 59, true),
+        ("/sym_60", 60, false),
+        ("/sym_long", 240, false),
+    ] {
+        let ino = fs.resolve(path).unwrap();
+        let inode = fs.inode(ino).unwrap();
+        assert_eq!(
+            inode.fast_symlink_target().is_some(),
+            fast,
+            "{path} fast/slow"
+        );
+        assert_eq!(fs.symlink_target(ino).unwrap().len(), len, "{path}");
+    }
+
+    // Specials.
+    let null = fs.inode(fs.resolve("/null").unwrap()).unwrap();
+    assert_eq!(null.dev_numbers(), Some((1, 3)));
+    let bigdev = fs.inode(fs.resolve("/bigdev").unwrap()).unwrap();
+    assert_eq!(bigdev.dev_numbers(), Some((254, 70000)));
+    assert_eq!(
+        fs.inode(fs.resolve("/fifo").unwrap()).unwrap().file_type(),
+        spec::inode::FileType::Fifo
+    );
+    assert_eq!(
+        fs.inode(fs.resolve("/sock").unwrap()).unwrap().file_type(),
+        spec::inode::FileType::Socket
+    );
+
+    // xattrs.
+    let root_attrs = fs.xattrs(spec::ROOT_INO).unwrap();
+    assert_eq!(root_attrs[0].full_name().unwrap(), b"security.selinux");
+    let attrs = fs.xattrs(fs.resolve("/attrs").unwrap()).unwrap();
+    let by_name = |n: &[u8]| {
+        attrs
+            .iter()
+            .find(|e| e.full_name().unwrap() == n)
+            .unwrap_or_else(|| panic!("missing {}", String::from_utf8_lossy(n)))
+            .clone()
+    };
+    assert_eq!(by_name(b"user.small").value, b"v");
+    assert_eq!(by_name(b"user.big").value.len(), 600);
+    assert_eq!(by_name(b"security.capability").value.len(), 8);
+    let dir_attrs = fs.xattrs(fs.resolve("/xdir").unwrap()).unwrap();
+    assert_eq!(dir_attrs[0].value, b"yes");
+
+    // htree.
+    let big = fs.resolve("/big").unwrap();
+    let inode = fs.inode(big).unwrap();
+    assert_ne!(inode.flags & spec::iflags::INDEX, 0, "big must be htree");
+    let n = fs
+        .read_dir(big)
+        .unwrap()
+        .iter()
+        .filter(|e| e.name != b"." && e.name != b"..")
+        .count();
+    assert_eq!(n, 2000);
+    for i in [0, 999, 1999] {
+        fs.resolve(&format!("/big/node_{i:06}_padpadpad")).unwrap();
+    }
+
+    // Sparse: holes read as zeros; extents show the gap.
+    let sp = fs.resolve("/sparse").unwrap();
+    let inode = fs.inode(sp).unwrap();
+    assert_eq!(inode.size, 8192 + (1 << 30) + 5000);
+    let fx = fs.extents(sp, &inode).unwrap();
+    assert!(fx.len() >= 2);
+    let logical_blocks: u64 = fx.iter().map(|e| u64::from(e.len)).sum();
+    assert_eq!(logical_blocks, 2 + 2, "only data blocks are mapped");
+    let mut buf = vec![0u8; 4096];
+    // Hole reads as zeros.
+    fs.read_file_at(&inode, &fx, 8192 + 4096, &mut buf).unwrap();
+    assert!(buf.iter().all(|&b| b == 0));
+    // Tail data round-trips.
+    let want = pattern_at(8192 + 5000, 6, 8192, 100);
+    fs.read_file_at(&inode, &fx, 1 << 30, &mut buf[..0])
+        .unwrap();
+    let mut got = vec![0u8; 100];
+    fs.read_file_at(&inode, &fx, 8192 + (1 << 30), &mut got)
+        .unwrap();
+    assert_eq!(got, want, "post-hole data");
+}
+
+#[test]
+fn htree_threshold_matches_oracle_rule() {
+    // Entry bytes < 4072 => linear (even at 2 blocks); >= 4072 => htree.
+    // 16-byte records ("e_NNN" names): 254 entries = 4064 B, 255 = 4080 B.
+    for (count, expect_htree) in [(254u32, false), (255, true)] {
+        let mut b = FsBuilder::new(options(16 << 20)).unwrap();
+        let d = b.mkdir(ROOT, "d", meta(0o755)).unwrap();
+        for i in 0..count {
+            b.file(d, &format!("e_{i:03}"), meta(0o644), 0).unwrap();
+        }
+        let layout = b.seal().unwrap();
+        let mut sink = VecSink::default();
+        layout.writer(&mut sink).unwrap().finish().unwrap();
+        let image = sink.buf;
+        assert_fsck_clean(&image, &format!("writer_thresh_{count}"));
+        let fs = Fs::open(&image[..]).unwrap();
+        assert!(fs.verify().unwrap().is_empty(), "{count} entries");
+        let inode = fs.inode(fs.resolve("/d").unwrap()).unwrap();
+        assert_eq!(
+            inode.flags & spec::iflags::INDEX != 0,
+            expect_htree,
+            "{count} entries"
+        );
+    }
+}
+
+#[test]
+fn two_level_htree() {
+    // ~140k entries exceeds one dx_root of leaves (507 * ~145/leaf).
+    let size = 1 << 30;
+    let mut opts = options(size);
+    opts.inodes = InodeCount::Exact(150_000);
+    let mut b = FsBuilder::new(opts).unwrap();
+    let d = b.mkdir(ROOT, "huge", meta(0o755)).unwrap();
+    for i in 0..140_000u32 {
+        b.file(d, &format!("node_{i:06}_padpadpad"), meta(0o644), 0)
+            .unwrap();
+    }
+    let layout = b.seal().unwrap();
+    let mut sink = VecSink::default();
+    layout.writer(&mut sink).unwrap().finish().unwrap();
+    let image = sink.buf;
+    assert_fsck_clean(&image, "writer_htree2");
+    let fs = Fs::open(&image[..]).unwrap();
+    // verify() re-hashes every one of the 140k names into its dx range.
+    let issues = fs.verify().unwrap();
+    assert!(issues.is_empty(), "{:?}", &issues[..issues.len().min(5)]);
+    let huge = fs.resolve("/huge").unwrap();
+    let n = fs
+        .read_dir(huge)
+        .unwrap()
+        .iter()
+        .filter(|e| e.name != b"." && e.name != b"..")
+        .count();
+    assert_eq!(n, 140_000);
+    for i in [0u32, 77_777, 139_999] {
+        fs.resolve(&format!("/huge/node_{i:06}_padpadpad")).unwrap();
+    }
 }
 
 #[test]

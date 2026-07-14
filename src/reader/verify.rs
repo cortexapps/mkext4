@@ -304,14 +304,25 @@ fn verify_dir<R: ReadAt>(
                     );
                 }
             }
-            let node_leaves = ranges(&node.entries);
-            // The node's own range must nest within its parent range.
-            if let (Some(first), Some(last)) = (node_leaves.first(), node_leaves.last()) {
-                if u64::from(first.1) < u64::from(node_lo) || last.2 > node_hi {
+            let mut node_leaves = ranges(&node.entries);
+            // Entry 0's hash is implicit: this node's lower bound comes
+            // from the PARENT's entry, not the stored (aliased) slot 0.
+            // Likewise the last leaf's upper bound is the parent's.
+            if let Some(first) = node_leaves.first_mut() {
+                first.1 = node_lo;
+            }
+            match node_leaves.last_mut() {
+                Some(last) if last.2 > node_hi => last.2 = node_hi,
+                _ => {}
+            }
+            // Every leaf range must nest within the parent range.
+            for &(_, lo, hi) in &node_leaves {
+                if u64::from(lo) < u64::from(node_lo) || hi > node_hi {
                     issue!(
                         issues,
                         "inode {ino}: dx_node {node_block} range escapes parent"
                     );
+                    break;
                 }
             }
             leaves.extend(node_leaves);
