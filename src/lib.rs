@@ -15,10 +15,16 @@
 //!   differential oracle against `mke2fs`, and the round-trip check for
 //!   the writer).
 
+pub mod build;
 pub mod csum;
 pub mod dirhash;
+pub mod layout;
 pub mod reader;
+pub mod sink;
 pub mod spec;
+
+pub use build::{Features, FsBuilder, InodeCount, InodeHandle, Layout, Meta, Options, ROOT};
+pub use sink::RegionSink;
 
 mod le;
 

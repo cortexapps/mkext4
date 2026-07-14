@@ -286,12 +286,18 @@ fill.
   block 0:            [1024 zero pad][superblock][zero pad to 4096]
   blocks 1..1+G:      primary GDT   (G = ceil(group_count·32/4096))
   flex-0 metadata:    16 block bitmaps, 16 inode bitmaps, 16 inode tables
-  journal:            J contiguous blocks (§15)
+  journal:            J blocks (§15; split at reserved runs)
   namespace metadata: for each inode in inode-number order:
-                        xattr block, extent tree blocks (root-first,
-                        breadth-first), then dir/htree/symlink content blocks
+                        xattr block, then dir/htree/symlink content blocks
   file data:          declaration order of surviving files, single
-                        ascending cursor
+                        ascending cursor; a file needing an extent tree
+                        (> 4 extents) gets its tree blocks immediately
+                        after its own data runs — the tree's size depends
+                        on how the data allocation split, so placing it
+                        behind the data keeps the layout single-pass
+                        (blocks are still seal-computable and emitted in
+                        the metadata pass; only their position is
+                        interleaved)
   ```
 
   The cursor for namespace metadata and file data is one monotone
@@ -614,10 +620,14 @@ Verified against `e2fsck -fD`-built trees (1-level, 300 entries; 2-level,
 
 ## 15. Journal (empty jbd2)
 
-- Inode 8: mode 0o100600 root:root, links 1, EXTENTS_FL, contiguous
-  allocation right after flex-0 metadata (deviation from mke2fs's
-  mid-device placement, §18). `i_size = blocks × 4096`, `i_blocks =
-  blocks × 8` [verified].
+- Inode 8: mode 0o100600 root:root, links 1, EXTENTS_FL, allocated
+  right after flex-0 metadata (deviation from mke2fs's mid-device
+  placement, §18). The journal is *extent-mapped like any file* and its
+  allocation splits around reserved runs (backup superblocks/GDTs, flex
+  metadata) — jbd2 requires logical, not physical, contiguity; a large
+  journal near the front necessarily straddles backup groups.
+  `i_size = blocks × 4096`, `i_blocks = blocks × 8` (+ extent tree
+  blocks if the split forces > 4 extents) [verified base shape].
 - Default size (blocks) by fs size [verified at 5 points, remaining tier
   boundaries from `ext2fs_default_journal_size`]:
 
@@ -820,9 +830,12 @@ clobbered (recovery drill, Linux CI).
 - **ADR-9 Holes are absent extents,** never unwritten: no block cost, no
   i_blocks inflation, natural zeros() semantics. Unwritten extents remain
   reader-supported (mke2fs images may contain them).
-- **ADR-10 Journal: mke2fs size tiers, contiguous, early placement,
-  feature-less empty jsb** (kernel upgrades on first mount — verified
-  that's mke2fs behavior too).
+- **ADR-10 Journal: mke2fs size tiers, early placement (split at
+  reserved runs), feature-less empty jsb** (kernel upgrades on first
+  mount — verified that's mke2fs behavior too). Physical contiguity was
+  considered and dropped: backups every 32768 blocks make a front-placed
+  large journal non-contiguous by construction, and jbd2 only needs
+  logical contiguity through the extent map.
 
 ## Appendix B — resolved research log
 

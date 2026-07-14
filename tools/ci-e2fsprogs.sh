@@ -22,7 +22,10 @@ trap 'rm -rf "$SRC"' EXIT
 
 URL="https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v$VER/e2fsprogs-$VER.tar.gz"
 echo "downloading $URL"
-curl -fsSL "$URL" -o "$SRC/e2fsprogs.tar.gz"
+# kernel.org mirrors intermittently reset HTTP/2 streams from CI runners;
+# force HTTP/1.1 and retry hard.
+curl -fsSL --http1.1 --retry 8 --retry-all-errors --retry-delay 5 \
+    "$URL" -o "$SRC/e2fsprogs.tar.gz"
 tar -xzf "$SRC/e2fsprogs.tar.gz" -C "$SRC"
 
 cd "$SRC/e2fsprogs-$VER"
