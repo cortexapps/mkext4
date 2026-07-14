@@ -1,5 +1,7 @@
 # mkext4
 
+[![crates.io](https://img.shields.io/crates/v/mkext4.svg)](https://crates.io/crates/mkext4)
+[![docs.rs](https://img.shields.io/docsrs/mkext4)](https://docs.rs/mkext4)
 [![CI](https://github.com/cortexapps/mkext4/actions/workflows/ci.yml/badge.svg)](https://github.com/cortexapps/mkext4/actions/workflows/ci.yml)
 
 Deterministic, streaming, pure-Rust ext4 image builder — plus a
@@ -111,13 +113,17 @@ filetype extent flex_bg sparse_super large_file huge_file dir_nlink
 extra_isize metadata_csum` — 4096-byte blocks, 256-byte inodes. Images
 mount read-write on any modern Linux kernel.
 
-## Status
+## Installing
 
-Feature-complete and heavily tested; not yet published to crates.io while
-the API settles. Byte-stability is guaranteed per crate version: the same
-inputs on the same version produce identical images, while layout policy
-may improve between versions (treat a version bump as a cache-invalidation
-event if you rely on image hashes).
+```sh
+cargo add mkext4
+```
+
+Early release (0.0.x): the API may still move before 0.1.
+Byte-stability is guaranteed per crate version: the same inputs on the
+same version produce identical images, while layout policy may improve
+between versions (treat a version bump as a cache-invalidation event if
+you rely on image hashes).
 
 ## Repository layout
 
