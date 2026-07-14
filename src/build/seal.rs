@@ -63,11 +63,12 @@ pub struct Layout {
     pub(crate) segments: Vec<Segment>,
     /// All file-data runs, sorted by block (gap-skip list for emission).
     pub(crate) data_runs: Vec<Run>,
-    /// ino -> rendered 256-byte inode (only for inodes that exist).
-    /// Known memory hot spot: ~256 B per inode retained until the writer
-    /// finishes. Fine at rootfs scale; render-on-demand is the planned
-    /// fix for multi-million-inode namespaces.
-    pub(crate) inodes: std::collections::BTreeMap<u32, [u8; 256]>,
+    /// Rendered 256-byte inodes, indexed by `ino - 1`. Inode numbering
+    /// is dense (1..=max_ino, no gaps), so a flat array carries zero
+    /// per-entry overhead and lets the inode table be emitted as
+    /// contiguous copies. ~256 B per inode retained until the writer
+    /// finishes.
+    pub(crate) inodes: Vec<[u8; 256]>,
     /// Highest used inode number.
     pub(crate) max_ino: u32,
 }
@@ -769,13 +770,22 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
     }
 
     // --- inodes -----------------------------------------------------------
-    let mut inodes = std::collections::BTreeMap::new();
-    inodes.insert(1u32, render_reserved_inode(fs_seed, 1, Some(b.opts.epoch)));
+    // Dense by construction: slots for 1..=max_ino, filled below.
+    let mut inodes = vec![[0u8; 256]; max_ino as usize];
+    let set_ino = |inodes: &mut Vec<[u8; 256]>, ino: u32, raw: [u8; 256]| {
+        inodes[ino as usize - 1] = raw;
+    };
+    set_ino(
+        &mut inodes,
+        1,
+        render_reserved_inode(fs_seed, 1, Some(b.opts.epoch)),
+    );
     for ino in [3u32, 4, 5, 6, 7, 9, 10] {
-        inodes.insert(ino, render_reserved_inode(fs_seed, ino, None));
+        set_ino(&mut inodes, ino, render_reserved_inode(fs_seed, ino, None));
     }
     let fs_meta = Meta::new(0, 0, 0, (b.opts.epoch, 0));
-    inodes.insert(
+    set_ino(
+        &mut inodes,
         JOURNAL_INO,
         render_inode(
             fs_seed,
@@ -796,7 +806,8 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
             },
         ),
     );
-    inodes.insert(
+    set_ino(
+        &mut inodes,
         LOST_FOUND_INO,
         render_inode(
             fs_seed,
@@ -843,7 +854,8 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
         let extra_root_link = if slot == 0 { 1 } else { 0 }; // lost+found's ".."
         let (file_acl, ibody) = std::mem::take(&mut xattr_out[slot]);
         let flags = iflags::EXTENTS | if d.is_htree { iflags::INDEX } else { 0 };
-        inodes.insert(
+        set_ino(
+            &mut inodes,
             ino,
             render_inode(
                 fs_seed,
@@ -937,16 +949,16 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
                 }
             }
         };
-        inodes.insert(ino, render_inode(fs_seed, ino, &render));
+        set_ino(&mut inodes, ino, render_inode(fs_seed, ino, &render));
     }
 
     // --- group descriptors -------------------------------------------------
     let ipg = geo.inodes_per_group;
     // Directory count per group (bg_used_dirs_count), one pass.
     let mut dir_count_per_group = vec![0u32; geo.groups as usize];
-    for (&ino, raw) in &inodes {
+    for (idx, raw) in inodes.iter().enumerate() {
         if crate::le::u16(raw, 0) >> 12 == 0o04 {
-            dir_count_per_group[((ino - 1) / ipg) as usize] += 1;
+            dir_count_per_group[(idx as u32 / ipg) as usize] += 1;
         }
     }
     let mut descs: Vec<GroupDesc> = Vec::with_capacity(geo.groups as usize);
@@ -1032,7 +1044,7 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
     }
 
     // --- superblock ---------------------------------------------------------
-    let journal_inode_raw = inodes[&JOURNAL_INO];
+    let journal_inode_raw = inodes[JOURNAL_INO as usize - 1];
     let mut jnl_blocks = [0u32; 17];
     for (i, w) in jnl_blocks.iter_mut().enumerate().take(15) {
         *w = crate::le::u32(&journal_inode_raw, 0x28 + 4 * i);

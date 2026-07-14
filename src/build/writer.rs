@@ -217,6 +217,9 @@ fn emit_metadata<S: RegionSink>(layout: &Layout, sink: &mut S) -> Result<()> {
 }
 
 /// Render one group's inode table block-by-block (16 inodes per block).
+/// Inode numbering is dense from 1, so the used prefix of the table is a
+/// contiguous slice of the rendered-inode array; the rest is one zeros
+/// run.
 fn emit_itable<S: RegionSink>(
     layout: &Layout,
     group: u32,
@@ -227,8 +230,6 @@ fn emit_itable<S: RegionSink>(
     let ipg = layout.geo.inodes_per_group;
     let first_ino = group * ipg + 1;
     let bs = BLOCK_SIZE as u64;
-    // Inodes are numbered densely from 1, so only a prefix of the table
-    // is nonzero; everything after the last used inode is one zeros run.
     let last_used_in_group = layout
         .max_ino
         .clamp(first_ino.saturating_sub(1), first_ino + ipg - 1)
@@ -236,13 +237,12 @@ fn emit_itable<S: RegionSink>(
     let used_blocks = (last_used_in_group as u64).div_ceil(16);
     let mut buf = vec![0u8; BLOCK_SIZE];
     for blk in 0..used_blocks {
-        buf.fill(0);
-        for i in 0..16u32 {
-            let ino = first_ino + blk as u32 * 16 + i;
-            if let Some(raw) = layout.inodes.get(&ino) {
-                buf[i as usize * 256..(i as usize + 1) * 256].copy_from_slice(raw);
-            }
+        let base = (first_ino - 1) as usize + blk as usize * 16;
+        let avail = layout.inodes.len().saturating_sub(base).min(16);
+        for (i, raw) in layout.inodes[base..base + avail].iter().enumerate() {
+            buf[i * 256..(i + 1) * 256].copy_from_slice(raw);
         }
+        buf[avail * 256..].fill(0);
         sink.data((start_block + blk) * bs, &buf)?;
     }
     if used_blocks < len {
