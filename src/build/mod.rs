@@ -1,7 +1,7 @@
 //! The builder API: declare a namespace, seal it into a frozen layout,
-//! then stream file contents (DESIGN.md §3).
+//! then stream file contents.
 //!
-//! Memory model (DESIGN.md §3): one fixed-size record per inode slot, all
+//! Memory model: one fixed-size record per inode slot, all
 //! names in a single byte arena, children as per-directory vectors of
 //! (name-ref, slot) — no per-entry heap strings.
 
@@ -24,7 +24,7 @@ pub struct Features(());
 impl Features {
     /// has_journal, ext_attr, dir_index; filetype, extents, flex_bg;
     /// sparse_super, large_file, huge_file, dir_nlink, extra_isize,
-    /// metadata_csum. See DESIGN.md §1.
+    /// metadata_csum.
     pub const LINUX_ROOTFS: Features = Features(());
 }
 
@@ -37,7 +37,7 @@ pub enum InodeCount {
     Exact(u32),
 }
 
-/// Seconds + nanoseconds since the epoch (ext4 range: DESIGN.md §9).
+/// Seconds + nanoseconds since the epoch (34-bit seconds reaching year 2446, 30-bit nanoseconds).
 pub type Timespec = (i64, u32);
 
 /// Per-inode metadata. `mode` carries permission bits only (0o7777);
@@ -75,7 +75,7 @@ impl Meta {
     }
 }
 
-/// Builder options (all determinism inputs are here — DESIGN.md §2).
+/// Builder options — together with the declaration sequence and file contents, the complete determinism inputs.
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Total image size in bytes (multiple of 4096). Required.
@@ -499,7 +499,7 @@ impl FsBuilder {
     }
 
     /// Remove `name` from `dir`. Removing a directory tombstones its
-    /// entire subtree (DESIGN.md §3); files drop out entirely when their
+    /// entire subtree; files drop out entirely when their
     /// last link goes.
     pub fn remove(&mut self, dir: InodeHandle, name: &str) -> Result<()> {
         let children = match self.nodes.get(dir.0 as usize).map(|n| &n.kind) {

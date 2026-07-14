@@ -1,6 +1,6 @@
 //! The ext4 superblock (1024 bytes at image offset 1024).
 //!
-//! Field offsets follow DESIGN.md §6. Regions this crate never sets —
+//! Regions this crate never sets —
 //! MMP, snapshot, error tracking, quota inums, encryption, mount options
 //! strings, sparse_super2 backups, and the reserved tail — decode-ignore
 //! and encode-zero; everything mke2fs 1.47.x writes nonzero for our
@@ -13,7 +13,7 @@ use crate::{corrupt, Result};
 /// Decoded superblock. Field names mirror the on-disk names without the
 /// `s_` prefix; `_lo`/`_hi` pairs are combined into full-width fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(missing_docs)] // field names are the documentation (DESIGN.md §6)
+#[allow(missing_docs)] // the on-disk field names are the documentation
 pub struct Superblock {
     pub inodes_count: u32,
     pub blocks_count: u64,

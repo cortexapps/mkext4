@@ -1,7 +1,7 @@
 //! Little-endian field access over byte slices.
 //!
 //! All on-disk structures are decoded/encoded through these helpers so
-//! that field offsets stay explicit and greppable against DESIGN.md.
+//! that field offsets stay explicit and greppable.
 //! Callers validate slice length once per structure; these panic on
 //! out-of-bounds, which indicates a bug, not bad input.
 

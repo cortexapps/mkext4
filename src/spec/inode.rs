@@ -11,7 +11,7 @@ use crate::{corrupt, Result};
 /// [`Inode::fast_symlink_target`], or the extent parsers in
 /// [`crate::spec::extent`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(missing_docs)] // field names are the documentation (DESIGN.md §9)
+#[allow(missing_docs)] // the on-disk field names are the documentation
 pub struct Inode {
     pub mode: u16,
     pub uid: u32,
@@ -22,7 +22,8 @@ pub struct Inode {
     pub mtime: u32,
     pub dtime: u32,
     pub links_count: u16,
-    /// 512-byte units, including metadata blocks (DESIGN.md §9).
+    /// 512-byte units, counting data blocks plus the inode's own
+    /// metadata blocks (extent tree, xattr block, directory content).
     pub blocks: u64,
     pub flags: u32,
     pub version: u64,

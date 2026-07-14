@@ -12,7 +12,7 @@ use crate::{corrupt, Result};
 
 /// Decoded jbd2 superblock (v2).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(missing_docs)] // field names are the documentation (DESIGN.md §15)
+#[allow(missing_docs)] // the on-disk field names are the documentation
 pub struct JournalSuperblock {
     /// `h_blocktype`: 3 = v1 superblock, 4 = v2 (the only kind we write).
     pub blocktype: u32,

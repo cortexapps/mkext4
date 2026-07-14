@@ -7,7 +7,7 @@ use crate::{corrupt, Result};
 /// One group descriptor with `_lo`/`_hi` pairs combined. For 32-byte
 /// descriptors the high halves are zero.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[allow(missing_docs)] // field names are the documentation (DESIGN.md §7)
+#[allow(missing_docs)] // the on-disk field names are the documentation
 pub struct GroupDesc {
     pub block_bitmap: u64,
     pub inode_bitmap: u64,

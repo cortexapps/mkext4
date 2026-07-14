@@ -1,7 +1,7 @@
 //! htree (dir_index) structures: dx_root in directory block 0, optional
 //! dx_node interior blocks, dirent-formatted leaves.
 //!
-//! Layout (DESIGN.md §12): dx_root = "." + ".." dirents, then
+//! Layout: dx_root = "." + ".." dirents, then
 //! `dx_root_info` at 0x18, then the entry array at 0x20 whose slot 0
 //! aliases `{limit u16, count u16, block u32}` (its hash is implicitly
 //! 0). dx_node = fake dirent `{0, rec_len 4096}`, then the same

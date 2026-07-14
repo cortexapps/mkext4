@@ -51,7 +51,7 @@ pub(crate) struct ExtentPlan {
     pub(crate) tree_blocks: u64,
 }
 
-/// Phase-2 output: the frozen layout (DESIGN.md §3).
+/// Phase-2 output: the frozen layout: every block address, every metadata byte, and the final offset of all future file data.
 pub struct Layout {
     pub(crate) opts: super::Options,
     pub(crate) geo: Geometry,
@@ -586,7 +586,7 @@ pub(super) fn seal(b: FsBuilder) -> Result<Layout> {
             continue;
         }
 
-        // xattrs first (DESIGN.md §5 ordering).
+        // xattr blocks precede the inode's content blocks on disk.
         if let Some(attrs) = b.xattrs.get(&slot) {
             let plan = super::xattr_build::plan(attrs.clone())?;
             let mut acl = 0u64;

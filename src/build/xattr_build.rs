@@ -1,4 +1,4 @@
-//! xattr rendering (DESIGN.md §13): canonical sort, in-inode area first
+//! xattr rendering: canonical sort, in-inode area first
 //! with a single split point, external block with entry/block hashes and
 //! the location-bound checksum.
 

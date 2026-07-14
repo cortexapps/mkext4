@@ -1,4 +1,4 @@
-//! Deterministic bulk htree construction (DESIGN.md §12, ADR-5).
+//! Deterministic bulk htree construction .
 //!
 //! Entries are hashed, sorted by `(hash, minor, declaration index)`, and
 //! packed into 100%-full leaves; dx levels are built bottom-up with the

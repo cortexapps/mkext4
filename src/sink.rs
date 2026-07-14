@@ -3,7 +3,7 @@
 //! A [`RegionSink`] receives every byte of the image exactly once, final
 //! when emitted, as positioned writes: explicit bytes via `data`,
 //! untouched space via `zeros` (so consumers can retire zero regions
-//! without any I/O). See DESIGN.md §4 for the emission schedule.
+//! without any I/O).
 
 use std::io;
 

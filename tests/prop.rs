@@ -1,4 +1,4 @@
-//! Property tests (DESIGN.md §19.7): arbitrary namespaces — nested dirs,
+//! Property tests: arbitrary namespaces — nested dirs,
 //! name edge cases, hardlink webs, size distributions, holes, whiteouts —
 //! must build to an image that passes `e2fsck -fn` and round-trips
 //! byte-exactly through the reader.

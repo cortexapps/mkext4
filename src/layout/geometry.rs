@@ -2,8 +2,7 @@
 //! backups, inode-table sizing, journal size tiers, and the overhead
 //! formula. Pure functions of the options — no allocation decisions here.
 //!
-//! Every rule is pinned against mke2fs 1.47.4 behavior (DESIGN.md §5,
-//! §15, §17 and the resolved research log).
+//! Every rule is pinned against mke2fs 1.47.4 behavior.
 
 use crate::spec::{BLOCKS_PER_GROUP, BLOCK_SIZE, INODE_SIZE};
 use crate::{Error, Result};
@@ -124,7 +123,7 @@ impl Geometry {
     }
 
     /// s_overhead_clusters: all blocks that can never hold file or
-    /// directory data (DESIGN.md §17; verified against mke2fs).
+    /// directory data (verified against mke2fs).
     pub fn overhead(&self) -> u64 {
         let backups = self.backup_groups().len() as u64;
         1 + u64::from(self.gdt_blocks)
@@ -156,7 +155,7 @@ mod tests {
 
     #[test]
     fn journal_tiers_match_mke2fs() {
-        // Empirically verified points (DESIGN.md research log).
+        // Empirically verified against mke2fs 1.47.4.
         assert_eq!(default_journal_blocks(4096), 1024);
         assert_eq!(default_journal_blocks(131072), 4096);
         assert_eq!(default_journal_blocks(305000), 8192);

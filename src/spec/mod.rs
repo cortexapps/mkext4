@@ -2,7 +2,7 @@
 //!
 //! Every structure decodes from and encodes into caller-provided byte
 //! slices — no allocation, no `unsafe`, all field offsets explicit and
-//! greppable against DESIGN.md. `encode(decode(bytes)) == bytes` holds for
+//! greppable. `encode(decode(bytes)) == bytes` holds for
 //! every structure on real mke2fs output (proven by unit tests against
 //! `testdata/vectors/`), which guarantees the model captures every
 //! nonzero byte these tools produce.
@@ -10,7 +10,7 @@
 //! Decoding is *tolerant* of fields this crate does not model (reserved
 //! and feature-specific regions decode-ignore, encode-zero), so the
 //! reader can open foreign images; the byte-exactness guarantee applies
-//! to the feature set in DESIGN.md §1.
+//! to the feature set this crate's writer emits.
 
 pub mod consts;
 pub mod dirent;

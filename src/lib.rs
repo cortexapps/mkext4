@@ -44,10 +44,6 @@
 //! # Ok(()) }
 //! ```
 //!
-//! See [DESIGN.md](https://github.com/cortexapps/mkext4/blob/main/DESIGN.md)
-//! for the on-disk layout decisions, the determinism contract, and the
-//! metadata-before-data emission argument.
-//!
 //! Layer map (bottom-up):
 //! - [`csum`] / [`dirhash`] — ext4's crc32c conventions and the half_md4
 //!   directory hash. Zero-allocation, append-style folds over borrowed

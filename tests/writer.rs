@@ -1,4 +1,4 @@
-//! Writer gates (DESIGN.md §19): every image passes `e2fsck -fn`, the
+//! Writer gates: every image passes `e2fsck -fn`, the
 //! reader round-trips it with zero verify() issues, the sink contract
 //! holds exactly, and the output is byte-deterministic (and sensitive).
 
