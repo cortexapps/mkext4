@@ -1,11 +1,11 @@
 [package]
-name = "streamext4"
+name = "mkext4"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
 description = "Deterministic, streaming, pure-Rust ext4 image builder with a verification-grade reader"
-repository = "https://github.com/cortexapps/streamext4"
+repository = "https://github.com/cortexapps/mkext4"
 keywords = ["ext4", "filesystem", "mkfs", "deterministic", "reproducible"]
 categories = ["filesystem"]
 exclude = ["/build", "/tools", "/testdata", "/.github"]

@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use mkext4::reader::Fs;
+use mkext4::sink::{CheckingSink, VecSink};
+use mkext4::{Features, FsBuilder, InodeCount, InodeHandle, Meta, Options, SparseSeg, ROOT};
 use proptest::prelude::*;
-use streamext4::reader::Fs;
-use streamext4::sink::{CheckingSink, VecSink};
-use streamext4::{Features, FsBuilder, InodeCount, InodeHandle, Meta, Options, SparseSeg, ROOT};
 
 const EPOCH: i64 = 1_704_067_200;
 
@@ -310,7 +310,7 @@ fn check_namespace(entries: Vec<(String, GenNode)>) {
         let inode = fs.inode(ino).unwrap();
         match expect {
             Expect::Dir => {
-                assert_eq!(inode.file_type(), streamext4::spec::inode::FileType::Dir)
+                assert_eq!(inode.file_type(), mkext4::spec::inode::FileType::Dir)
             }
             Expect::Symlink { target } => {
                 assert_eq!(&fs.symlink_target(ino).unwrap(), target, "{path}");
@@ -342,7 +342,7 @@ fn check_namespace(entries: Vec<(String, GenNode)>) {
         }
     }
     // Reverse: no unexpected top-level entries beyond lost+found.
-    for e in fs.read_dir(streamext4::spec::ROOT_INO).unwrap() {
+    for e in fs.read_dir(mkext4::spec::ROOT_INO).unwrap() {
         let name = String::from_utf8_lossy(&e.name).into_owned();
         if [".", "..", "lost+found"].contains(&name.as_str()) {
             continue;

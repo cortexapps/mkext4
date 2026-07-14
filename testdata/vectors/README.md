@@ -1,7 +1,7 @@
 # Extracted ext4 test vectors
 
 Binary structures extracted from real `mke2fs 1.47.4` images, used as golden
-fixtures for streamext4's on-disk encoders and checksum primitives. Every
+fixtures for mkext4's on-disk encoders and checksum primitives. Every
 checksum inside these blobs has been recomputed and verified by
 `tools/check_vectors.py check`; the Rust unit tests must reproduce them too.
 

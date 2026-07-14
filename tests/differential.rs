@@ -11,8 +11,8 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use streamext4::reader::Fs;
-use streamext4::spec::{self, inode::FileType};
+use mkext4::reader::Fs;
+use mkext4::spec::{self, inode::FileType};
 
 fn e2fsprogs_sbin() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("E2FSPROGS_SBIN") {

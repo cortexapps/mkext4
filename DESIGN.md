@@ -1,4 +1,4 @@
-# streamext4 — design
+# mkext4 — design
 
 A deterministic, streaming, pure-Rust ext4 image writer (plus a
 verification-grade reader). Input: an abstract namespace declared through a

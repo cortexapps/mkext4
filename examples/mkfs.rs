@@ -11,8 +11,8 @@ use std::io::BufReader;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
 
-use streamext4::sink::FileSink;
-use streamext4::{Features, FsBuilder, InodeCount, InodeHandle, Meta, Options, SpecialKind, ROOT};
+use mkext4::sink::FileSink;
+use mkext4::{Features, FsBuilder, InodeCount, InodeHandle, Meta, Options, SpecialKind, ROOT};
 
 fn meta_from(md: &std::fs::Metadata) -> Meta {
     let mut m = Meta::new(
@@ -32,7 +32,7 @@ fn declare(
     path: &Path,
     hardlinks: &mut HashMap<(u64, u64), InodeHandle>,
     fills: &mut Vec<(InodeHandle, std::path::PathBuf)>,
-) -> streamext4::Result<()> {
+) -> mkext4::Result<()> {
     let mut entries: Vec<_> = std::fs::read_dir(path)
         .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
         .map(|e| e.unwrap())
@@ -97,15 +97,15 @@ fn main() {
     };
     let size: u64 = size.parse().expect("size-bytes");
 
-    // STREAMEXT4_INODES pins the inode count (benchmarks pass the same
+    // MKEXT4_INODES pins the inode count (benchmarks pass the same
     // value to mke2fs -N for a fair comparison).
-    let inodes = std::env::var("STREAMEXT4_INODES")
+    let inodes = std::env::var("MKEXT4_INODES")
         .ok()
-        .map(|v| InodeCount::Exact(v.parse().expect("STREAMEXT4_INODES")))
+        .map(|v| InodeCount::Exact(v.parse().expect("MKEXT4_INODES")))
         .unwrap_or(InodeCount::Auto);
     let mut b = FsBuilder::new(Options {
         size_bytes: size,
-        fs_uuid: *b"streamext4-bench",
+        fs_uuid: *b"mkext4-benchmark",
         hash_seed: [0xdead_beef, 0x1234_5678, 0x9abc_def0, 0x0f0f_0f0f],
         epoch: 1_704_067_200,
         inodes,

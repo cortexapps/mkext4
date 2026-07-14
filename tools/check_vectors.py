@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify streamext4's documented ext4 checksum/hash algorithms against real
+"""Verify mkext4's documented ext4 checksum/hash algorithms against real
 mke2fs images, and extract test-vector blobs for the Rust unit tests.
 
 This is a deliberately independent reimplementation of every on-disk

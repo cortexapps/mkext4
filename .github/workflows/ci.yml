@@ -60,7 +60,7 @@ jobs:
           sudo apt-get install -y -qq attr >/dev/null
           BIN=$(cargo test --test mount --no-run --message-format=json \
                 | jq -r 'select(.executable != null) | select(.target.name == "mount") | .executable' | tail -1)
-          sudo STREAMEXT4_MOUNT=1 "$BIN" --nocapture
+          sudo MKEXT4_MOUNT=1 "$BIN" --nocapture
 
   # DESIGN.md §19 gate 10: both benchmarks must beat mke2fs wall-clock.
   bench:

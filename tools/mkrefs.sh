@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate mke2fs reference images for streamext4 format research.
+# Generate mke2fs reference images for mkext4 format research.
 #
 # Produces, under $OUT (default build/refs):
 #   img/<name>.img        raw ext4 images made by mke2fs 1.47.x

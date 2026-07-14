@@ -5,10 +5,10 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use streamext4::reader::Fs;
-use streamext4::sink::{CheckingSink, VecSink};
-use streamext4::spec;
-use streamext4::{Features, FsBuilder, InodeCount, Meta, Options, SparseSeg, ROOT};
+use mkext4::reader::Fs;
+use mkext4::sink::{CheckingSink, VecSink};
+use mkext4::spec;
+use mkext4::{Features, FsBuilder, InodeCount, Meta, Options, SparseSeg, ROOT};
 
 const UUID: [u8; 16] = [
     0xd0, 0xd0, 0xca, 0xca, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
@@ -324,7 +324,7 @@ fn pattern_at(total: u64, seed: u64, offset: u64, len: usize) -> Vec<u8> {
 
 #[test]
 fn full_feature_namespace() {
-    use streamext4::SpecialKind;
+    use mkext4::SpecialKind;
     let size = 128 << 20;
     let build = || {
         let mut b = FsBuilder::new(options(size)).unwrap();

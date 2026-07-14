@@ -3,7 +3,7 @@
 //! nlink/hardlink identity, symlink targets, device numbers, xattrs,
 //! content bytes, sparse holes, and htree lookups through the kernel.
 //!
-//! Requires root + Linux; gated on STREAMEXT4_MOUNT=1. CI builds the
+//! Requires root + Linux; gated on MKEXT4_MOUNT=1. CI builds the
 //! test binary unprivileged and runs it under sudo.
 
 #![cfg(target_os = "linux")]
@@ -13,8 +13,8 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::Command;
 
-use streamext4::sink::FileSink;
-use streamext4::{Features, FsBuilder, InodeCount, Meta, Options, SparseSeg, SpecialKind, ROOT};
+use mkext4::sink::FileSink;
+use mkext4::{Features, FsBuilder, InodeCount, Meta, Options, SparseSeg, SpecialKind, ROOT};
 
 const EPOCH: i64 = 1_704_067_200;
 
@@ -73,8 +73,8 @@ fn sh(cmd: &str) -> Result<String, String> {
 
 #[test]
 fn kernel_mount_oracle() {
-    if std::env::var("STREAMEXT4_MOUNT").as_deref() != Ok("1") {
-        eprintln!("SKIP: set STREAMEXT4_MOUNT=1 and run as root");
+    if std::env::var("MKEXT4_MOUNT").as_deref() != Ok("1") {
+        eprintln!("SKIP: set MKEXT4_MOUNT=1 and run as root");
         return;
     }
     assert_eq!(effective_uid(), 0, "must run as root");
@@ -89,7 +89,7 @@ fn kernel_mount_oracle() {
     let size = 256u64 << 20;
     let mut b = FsBuilder::new(Options {
         size_bytes: size,
-        fs_uuid: *b"streamext4-mount",
+        fs_uuid: *b"mkext4-mounttest",
         hash_seed: [1, 2, 3, 4],
         epoch: EPOCH,
         inodes: InodeCount::Auto,

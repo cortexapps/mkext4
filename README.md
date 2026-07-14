@@ -1,6 +1,6 @@
-# streamext4
+# mkext4
 
-[![CI](https://github.com/cortexapps/streamext4/actions/workflows/ci.yml/badge.svg)](https://github.com/cortexapps/streamext4/actions/workflows/ci.yml)
+[![CI](https://github.com/cortexapps/mkext4/actions/workflows/ci.yml/badge.svg)](https://github.com/cortexapps/mkext4/actions/workflows/ci.yml)
 
 Deterministic, streaming, pure-Rust ext4 image builder — plus a
 verification-grade reader. No C dependencies, no kernel mounts, no clocks,
@@ -62,14 +62,14 @@ pub trait RegionSink {
 -d` and with this crate (`examples/mkfs.rs`), identical feature sets and
 inode counts, both non-lazy, output gated on `e2fsck -fn`:
 
-| benchmark | platform | mke2fs 1.47.4 | streamext4 | speedup |
+| benchmark | platform | mke2fs 1.47.4 | mkext4 | speedup |
 |---|---|---|---|---|
 | ~120k small files (node_modules-like) | macOS, M-series/APFS | 8.02 s | 4.13 s | **1.9×** |
 | | Linux, GitHub runner/ext4 | 8.76 s | 1.94 s | **4.5×** |
 | ~4.2 GiB tree with multi-GiB files | macOS, M-series/APFS | 19.3 s | 3.42 s | **5.6×** |
 | | Linux, GitHub runner/ext4 | 45.3 s | 35.3 s | **1.3×** |
 
-The CI bench lane fails if streamext4 ever loses. The one-pass design is
+The CI bench lane fails if mkext4 ever loses. The one-pass design is
 the difference: no staged tree re-walk, metadata computed once, and
 `zeros` regions never touch the sink.
 

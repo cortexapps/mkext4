@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Benchmark streamext4 against mke2fs -d (DESIGN.md §19 gate 10).
+# Benchmark mkext4 against mke2fs -d (DESIGN.md §19 gate 10).
 #
 #   (a) small-files: ~120k small files across nested dirs (node_modules-like)
 #   (b) big-files:   ~4 GiB tree containing multi-GiB files
@@ -8,7 +8,7 @@
 #   E2SBIN         e2fsprogs sbin dir (default: brew keg or PATH)
 #   BENCH_SMALL=0  skip the small-files benchmark
 #   BENCH_BIG=0    skip the big-files benchmark
-#   ASSERT_FASTER=1  exit nonzero unless streamext4 wins both
+#   ASSERT_FASTER=1  exit nonzero unless mkext4 wins both
 #
 # Requires hyperfine.
 
@@ -59,21 +59,21 @@ make_big_tree() {     # ~4 GiB: two multi-GiB files + some medium ones
 
 run_case() {          # $1 name, $2 tree, $3 image-blocks, $4 inode count
     local name=$1 tree=$2 blocks=$3 inodes=$4
-    local img_a="$OUT/$name-mke2fs.img" img_b="$OUT/$name-streamext4.img"
+    local img_a="$OUT/$name-mke2fs.img" img_b="$OUT/$name-mkext4.img"
     echo "== $name" >&2
     hyperfine --warmup 1 --runs 5 --export-json "$OUT/$name.json" \
         --command-name mke2fs     "rm -f $img_a && $E2SBIN/mke2fs $MKFS_OPTS -N $inodes -d $tree $img_a $blocks" \
-        --command-name streamext4 "rm -f $img_b && STREAMEXT4_INODES=$inodes $MKFS_RS $tree $img_b $((blocks * 4096))"
+        --command-name mkext4 "rm -f $img_b && MKEXT4_INODES=$inodes $MKFS_RS $tree $img_b $((blocks * 4096))"
     # Sanity: our image must be fsck-clean.
     "$E2SBIN/e2fsck" -fn "$img_b" >/dev/null
     python3 - "$OUT/$name.json" <<'EOF'
 import json, sys
 r = json.load(open(sys.argv[1]))["results"]
 by = {x["command"]: x["mean"] for x in r}
-ratio = by["mke2fs"] / by["streamext4"]
-print(f'{sys.argv[1]}: mke2fs {by["mke2fs"]:.3f}s  streamext4 {by["streamext4"]:.3f}s  speedup {ratio:.2f}x')
+ratio = by["mke2fs"] / by["mkext4"]
+print(f'{sys.argv[1]}: mke2fs {by["mke2fs"]:.3f}s  mkext4 {by["mkext4"]:.3f}s  speedup {ratio:.2f}x')
 if __import__("os").environ.get("ASSERT_FASTER") == "1" and ratio < 1.0:
-    sys.exit(f"streamext4 lost to mke2fs ({ratio:.2f}x)")
+    sys.exit(f"mkext4 lost to mke2fs ({ratio:.2f}x)")
 EOF
 }
 

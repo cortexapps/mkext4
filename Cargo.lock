@@ -102,6 +102,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "mkext4"
+version = "0.1.0"
+dependencies = [
+ "crc32c",
+ "proptest",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -263,14 +271,6 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
-
-[[package]]
-name = "streamext4"
-version = "0.1.0"
-dependencies = [
- "crc32c",
- "proptest",
-]
 
 [[package]]
 name = "syn"
