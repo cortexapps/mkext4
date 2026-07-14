@@ -1,6 +1,6 @@
 # mkext4
 
-[![crates.io](https://img.shields.io/crates/v/mkext4.svg)](https://crates.io/crates/mkext4)
+[![crates.io](https://img.shields.io/crates/v/mkext4)](https://crates.io/crates/mkext4)
 [![docs.rs](https://img.shields.io/docsrs/mkext4)](https://docs.rs/mkext4)
 [![CI](https://github.com/cortexapps/mkext4/actions/workflows/ci.yml/badge.svg)](https://github.com/cortexapps/mkext4/actions/workflows/ci.yml)
 
