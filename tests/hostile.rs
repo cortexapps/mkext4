@@ -6,25 +6,14 @@
 
 use mkext4::reader::Fs;
 use mkext4::sink::VecSink;
-use mkext4::{Features, FsBuilder, InodeCount, Meta, Options, ROOT};
+use mkext4::{FsBuilder, Meta, Options, ROOT};
 
 mod common;
 use common::EPOCH;
 
 /// A small valid image to corrupt.
 fn valid_image() -> Vec<u8> {
-    let mut b = FsBuilder::new(Options {
-        size_bytes: 16 << 20,
-        fs_uuid: [9; 16],
-        hash_seed: [1, 2, 3, 4],
-        epoch: EPOCH,
-        inodes: InodeCount::Auto,
-        label: None,
-        reserved_percent: 5,
-        journal_blocks: None,
-        features: Features::LINUX_ROOTFS,
-    })
-    .unwrap();
+    let mut b = FsBuilder::new(Options::new(16 << 20, [9; 16], EPOCH)).unwrap();
     b.file(ROOT, "f", Meta::new(0o644, 0, 0, (EPOCH, 0)), 0)
         .unwrap();
     let layout = b.seal().unwrap();

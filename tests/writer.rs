@@ -5,7 +5,7 @@
 use mkext4::reader::Fs;
 use mkext4::sink::{CheckingSink, VecSink};
 use mkext4::spec;
-use mkext4::{Features, FsBuilder, InodeCount, Meta, Options, SparseSeg, ROOT};
+use mkext4::{FsBuilder, InodeCount, Meta, Options, SparseSeg, ROOT};
 
 mod common;
 use common::{pattern_at, pattern_bytes, Pattern, EPOCH};
@@ -16,17 +16,10 @@ const UUID: [u8; 16] = [
 const SEED: [u32; 4] = [0xefbe_adde, 0xad4e_adde, 0xadde_ad8e, 0x0000_efbe];
 
 fn options(size: u64) -> Options {
-    Options {
-        size_bytes: size,
-        fs_uuid: UUID,
-        hash_seed: SEED,
-        epoch: EPOCH,
-        inodes: InodeCount::Auto,
-        label: Some("strext4".into()),
-        reserved_percent: 5,
-        journal_blocks: None,
-        features: Features::LINUX_ROOTFS,
-    }
+    let mut o = Options::new(size, UUID, EPOCH);
+    o.hash_seed = SEED;
+    o.label = Some("mkext4".into());
+    o
 }
 
 fn meta(mode: u16) -> Meta {

@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::Command;
 
 use mkext4::sink::FileSink;
-use mkext4::{Features, FsBuilder, InodeCount, Meta, Options, SparseSeg, SpecialKind, ROOT};
+use mkext4::{FsBuilder, Meta, Options, SparseSeg, SpecialKind, ROOT};
 
 mod common;
 use common::{pattern_bytes, Pattern, EPOCH};
@@ -51,18 +51,10 @@ fn kernel_mount_oracle() {
 
     // --- build ------------------------------------------------------------
     let size = 256u64 << 20;
-    let mut b = FsBuilder::new(Options {
-        size_bytes: size,
-        fs_uuid: *b"mkext4-mounttest",
-        hash_seed: [1, 2, 3, 4],
-        epoch: EPOCH,
-        inodes: InodeCount::Auto,
-        label: Some("mnttest".into()),
-        reserved_percent: 5,
-        journal_blocks: None,
-        features: Features::LINUX_ROOTFS,
-    })
-    .unwrap();
+    let mut opts = Options::new(size, *b"mkext4-mounttest", EPOCH);
+    opts.hash_seed = [1, 2, 3, 4];
+    opts.label = Some("mnttest".into());
+    let mut b = FsBuilder::new(opts).unwrap();
 
     let usr = b.mkdir(ROOT, "usr", meta(0o755, 0, 0)).unwrap();
     let f = b

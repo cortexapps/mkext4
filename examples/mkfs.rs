@@ -12,7 +12,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
 
 use mkext4::sink::FileSink;
-use mkext4::{Features, FsBuilder, InodeCount, InodeHandle, Meta, Options, SpecialKind, ROOT};
+use mkext4::{FsBuilder, InodeCount, InodeHandle, Meta, Options, SpecialKind, ROOT};
 
 fn meta_from(md: &std::fs::Metadata) -> Meta {
     let mut m = Meta::new(
@@ -103,18 +103,9 @@ fn main() {
         .ok()
         .map(|v| InodeCount::Exact(v.parse().expect("MKEXT4_INODES")))
         .unwrap_or(InodeCount::Auto);
-    let mut b = FsBuilder::new(Options {
-        size_bytes: size,
-        fs_uuid: *b"mkext4-benchmark",
-        hash_seed: [0xdead_beef, 0x1234_5678, 0x9abc_def0, 0x0f0f_0f0f],
-        epoch: 1_704_067_200,
-        inodes,
-        label: None,
-        reserved_percent: 5,
-        journal_blocks: None,
-        features: Features::LINUX_ROOTFS,
-    })
-    .expect("options");
+    let mut opts = Options::new(size, *b"mkext4-benchmark", 1_704_067_200);
+    opts.inodes = inodes;
+    let mut b = FsBuilder::new(opts).expect("options");
 
     let mut hardlinks = HashMap::new();
     let mut fills = Vec::new();

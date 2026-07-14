@@ -14,21 +14,13 @@
 //!
 //! ```
 //! use mkext4::sink::VecSink;
-//! use mkext4::{Features, FsBuilder, InodeCount, Meta, Options, ROOT};
+//! use mkext4::{FsBuilder, Meta, Options, ROOT};
 //!
 //! # fn main() -> mkext4::Result<()> {
 //! let epoch = 1_704_067_200;
-//! let mut b = FsBuilder::new(Options {
-//!     size_bytes: 16 << 20,
-//!     fs_uuid: [0x42; 16],
-//!     hash_seed: [1, 2, 3, 4],
-//!     epoch,
-//!     inodes: InodeCount::Auto,
-//!     label: Some("demo".into()),
-//!     reserved_percent: 5,
-//!     journal_blocks: None,
-//!     features: Features::LINUX_ROOTFS,
-//! })?;
+//! let mut opts = Options::new(16 << 20, [0x42; 16], epoch);
+//! opts.label = Some("demo".into());
+//! let mut b = FsBuilder::new(opts)?;
 //! let etc = b.mkdir(ROOT, "etc", Meta::new(0o755, 0, 0, (epoch, 0)))?;
 //! let f = b.file(etc, "hostname", Meta::new(0o644, 0, 0, (epoch, 0)), 5)?;
 //!

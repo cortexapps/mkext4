@@ -8,7 +8,7 @@ use std::io::Read;
 
 use mkext4::reader::Fs;
 use mkext4::sink::{CheckingSink, VecSink};
-use mkext4::{Features, FsBuilder, InodeCount, InodeHandle, Meta, Options, SparseSeg, ROOT};
+use mkext4::{FsBuilder, InodeCount, InodeHandle, Meta, Options, SparseSeg, ROOT};
 use proptest::prelude::*;
 
 mod common;
@@ -201,18 +201,11 @@ impl Builder {
 
 fn check_namespace(entries: Vec<(String, GenNode)>) {
     let size = 2u64 << 30;
-    let b = FsBuilder::new(Options {
-        size_bytes: size,
-        fs_uuid: [7; 16],
-        hash_seed: [11, 22, 33, 44],
-        epoch: EPOCH,
-        inodes: InodeCount::Exact(4096),
-        label: None,
-        reserved_percent: 5,
-        journal_blocks: Some(1024),
-        features: Features::LINUX_ROOTFS,
-    })
-    .unwrap();
+    let mut opts = Options::new(size, [7; 16], EPOCH);
+    opts.hash_seed = [11, 22, 33, 44];
+    opts.inodes = InodeCount::Exact(4096);
+    opts.journal_blocks = Some(1024);
+    let b = FsBuilder::new(opts).unwrap();
     let mut builder = Builder {
         b,
         fills: Vec::new(),

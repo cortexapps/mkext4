@@ -75,14 +75,31 @@ impl Meta {
     }
 }
 
-/// Builder options — together with the declaration sequence and file contents, the complete determinism inputs.
+/// Builder options — together with the declaration sequence and file
+/// contents, the complete determinism inputs: the same options and calls
+/// always produce byte-identical images.
+///
+/// Construct with [`Options::new`] and adjust fields as needed:
+///
+/// ```
+/// use mkext4::{InodeCount, Options};
+///
+/// let mut opts = Options::new(1 << 30, [0x42; 16], 1_704_067_200);
+/// opts.label = Some("rootfs".into());
+/// opts.inodes = InodeCount::Exact(200_000);
+/// ```
+///
+/// The struct is `#[non_exhaustive]`, so new options can be added
+/// without breaking construction.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Options {
     /// Total image size in bytes (multiple of 4096). Required.
     pub size_bytes: u64,
     /// Filesystem UUID (never sampled).
     pub fs_uuid: [u8; 16],
-    /// htree hash seed (`s_hash_seed`).
+    /// htree hash seed (`s_hash_seed`). Defaults to a seed derived from
+    /// the UUID (what `mke2fs -E hash_seed=UUID` does).
     pub hash_seed: [u32; 4],
     /// Superblock timestamps (`s_mkfs_time`, `s_wtime`, `s_lastcheck`)
     /// and the timestamp of fs-owned inodes (root default, lost+found,
@@ -94,10 +111,30 @@ pub struct Options {
     pub label: Option<String>,
     /// Reserved blocks percentage (mke2fs default 5).
     pub reserved_percent: u8,
-    /// Journal size override in blocks (default: size-tiered, §15).
+    /// Journal size override in blocks (default: sized by a tier table
+    /// matching mke2fs, from 1024 blocks on tiny images to 262144).
     pub journal_blocks: Option<u32>,
     /// Feature profile.
     pub features: Features,
+}
+
+impl Options {
+    /// Options with the required determinism inputs and defaults for the
+    /// rest: UUID-derived hash seed, automatic inode count, no label,
+    /// 5% reserved blocks, tier-sized journal.
+    pub fn new(size_bytes: u64, fs_uuid: [u8; 16], epoch: i64) -> Options {
+        Options {
+            size_bytes,
+            fs_uuid,
+            hash_seed: crate::dirhash::seed_from_uuid(&fs_uuid),
+            epoch,
+            inodes: InodeCount::Auto,
+            label: None,
+            reserved_percent: 5,
+            journal_blocks: None,
+            features: Features::LINUX_ROOTFS,
+        }
+    }
 }
 
 /// Declared xattrs per builder slot.
