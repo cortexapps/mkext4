@@ -78,9 +78,9 @@ inode counts, both non-lazy, output gated on `e2fsck -fn`:
 | benchmark | platform | mke2fs 1.47.4 | mkext4 | speedup |
 |---|---|---|---|---|
 | ~120k small files (node_modules-like) | macOS, M-series/APFS | 6.08 s | 3.50 s | **1.7×** |
-| | Linux, GitHub runner/ext4 | 8.76 s | 1.94 s | **4.5×** |
+| | Linux, GitHub runner/ext4 | 5.57 s | 1.57 s | **3.5×** |
 | ~4.2 GiB tree with multi-GiB files | macOS, M-series/APFS | 20.5 s | 3.51 s | **5.8×** |
-| | Linux, GitHub runner/ext4 | 45.3 s | 35.3 s | **1.3×** |
+| | Linux, GitHub runner/ext4 | 26.8 s | 5.49 s | **4.9×** |
 
 Profiling shows mkext4 spends under 3% of wall time in its own code —
 the rest is read/stat/pwrite syscalls against the source tree and
