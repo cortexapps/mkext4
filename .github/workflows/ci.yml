@@ -6,9 +6,11 @@ on:
   pull_request:
 
 env:
-  # The format oracle. DESIGN.md's verified claims are against this exact
-  # version; bumping it is a deliberate oracle upgrade, not routine chore.
+  # The format oracle. The design's verified claims are against this
+  # exact version; bumping it is a deliberate oracle upgrade.
   E2FSPROGS_VERSION: 1.47.4
+  # Older fsck generation the images must also satisfy.
+  E2FSPROGS_VINTAGE: 1.46.5
 
 jobs:
   test:
@@ -32,10 +34,23 @@ jobs:
           path: ~/e2fsprogs
           key: e2fsprogs-${{ env.E2FSPROGS_VERSION }}-${{ matrix.os }}
 
+      - name: Cache vintage e2fsprogs
+        uses: actions/cache@v4
+        with:
+          path: ~/e2fsprogs-vintage
+          key: e2fsprogs-${{ env.E2FSPROGS_VINTAGE }}-${{ matrix.os }}
+
       - name: Build pinned e2fsprogs
         run: |
           tools/ci-e2fsprogs.sh "$E2FSPROGS_VERSION" "$HOME/e2fsprogs"
           echo "E2FSPROGS_SBIN=$HOME/e2fsprogs/sbin" >> "$GITHUB_ENV"
+
+      # Published images must be clean under more than one fsck
+      # generation, not just the format oracle.
+      - name: Build vintage e2fsck
+        run: |
+          tools/ci-e2fsprogs.sh "$E2FSPROGS_VINTAGE" "$HOME/e2fsprogs-vintage"
+          echo "E2FSCK_VINTAGE=$HOME/e2fsprogs-vintage/sbin/e2fsck" >> "$GITHUB_ENV"
 
       - name: rustfmt
         run: cargo fmt --check

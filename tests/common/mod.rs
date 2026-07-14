@@ -78,8 +78,11 @@ pub fn e2fsprogs_sbin() -> Option<PathBuf> {
     std::env::split_paths(&path).find(|dir| dir.join("e2fsck").exists())
 }
 
-/// `e2fsck -fn` must exit 0 with no complaints; skips (with a note) when
-/// e2fsprogs is unavailable. `dir` is the test binary's tmpdir.
+/// `e2fsck -fn` must exit 0 with no complaints — under the pinned
+/// e2fsprogs AND, when `E2FSCK_VINTAGE` names an older e2fsck binary,
+/// under that vintage too (published images must be clean across fsck
+/// generations). Skips (with a note) when e2fsprogs is unavailable.
+/// `dir` is the test binary's tmpdir.
 pub fn assert_fsck_clean(dir: &Path, image: &[u8], tag: &str) {
     let Some(sbin) = e2fsprogs_sbin() else {
         eprintln!("SKIP fsck gate: e2fsprogs not found");
@@ -88,16 +91,23 @@ pub fn assert_fsck_clean(dir: &Path, image: &[u8], tag: &str) {
     std::fs::create_dir_all(dir).unwrap();
     let img = dir.join(format!("{tag}.img"));
     std::fs::write(&img, image).unwrap();
-    let out = std::process::Command::new(sbin.join("e2fsck"))
-        .arg("-fn")
-        .arg(&img)
-        .output()
-        .expect("running e2fsck");
-    assert!(
-        out.status.success(),
-        "{tag}: e2fsck -fn failed:\n{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let mut fscks = vec![sbin.join("e2fsck")];
+    if let Ok(vintage) = std::env::var("E2FSCK_VINTAGE") {
+        fscks.push(PathBuf::from(vintage));
+    }
+    for fsck in fscks {
+        let out = std::process::Command::new(&fsck)
+            .arg("-fn")
+            .arg(&img)
+            .output()
+            .unwrap_or_else(|e| panic!("running {}: {e}", fsck.display()));
+        assert!(
+            out.status.success(),
+            "{tag}: {} -fn failed:\n{}{}",
+            fsck.display(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     let _ = std::fs::remove_file(&img);
 }

@@ -31,9 +31,21 @@ tar -xzf "$SRC/e2fsprogs.tar.gz" -C "$SRC"
 cd "$SRC/e2fsprogs-$VER"
 # =no on the system-integration dirs keeps `make install` inside the
 # prefix (otherwise install-udev writes to /usr/lib/udev and fails).
-./configure --prefix="$PREFIX" --disable-nls --disable-fuse2fs \
+# Hermetic build: developer shells often export brew include/lib paths,
+# which would silently mix this version's sources with another
+# version's installed headers.
+CPPFLAGS= LDFLAGS= CFLAGS= \
+    ./configure --prefix="$PREFIX" --disable-nls --disable-fuse2fs \
     --with-udev-rules-dir=no --with-systemd-unit-dir=no --with-crond-dir=no >/dev/null
 make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" >/dev/null
-make install >/dev/null
+# Older releases (1.46.x) have install quirks (man-dir creation fails on
+# BSD install); tolerate install failures and copy the tools we need
+# straight from the build tree, then verify.
+mkdir -p "$PREFIX/sbin"
+make install >/dev/null 2>&1 || true
+cp -f e2fsck/e2fsck debugfs/debugfs misc/mke2fs misc/dumpe2fs "$PREFIX/sbin/" 2>/dev/null || true
+for tool in mke2fs e2fsck debugfs dumpe2fs; do
+    [ -x "$PREFIX/sbin/$tool" ] || { echo "$tool missing from $PREFIX/sbin" >&2; exit 1; }
+done
 echo "installed e2fsprogs $VER to $PREFIX"
 "$PREFIX/sbin/mke2fs" -V
