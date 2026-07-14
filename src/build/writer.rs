@@ -33,8 +33,9 @@ pub struct ImageWriter<'a, S: RegionSink> {
     pending: usize,
     data_bytes: u64,
     poisoned: bool,
-    /// Reused across fills (256 KiB; one allocation per writer, not per
-    /// file — this matters at node_modules scale).
+    /// Reused across fills (one allocation per writer, not per file).
+    /// 4 MiB: big enough that syscall count, not chunking, bounds large
+    /// fills; small enough to be irrelevant per writer.
     scratch: Vec<u8>,
 }
 
@@ -64,7 +65,7 @@ impl<'a, S: RegionSink> ImageWriter<'a, S> {
             pending,
             data_bytes: 0,
             poisoned: false,
-            scratch: vec![0u8; 64 * BLOCK_SIZE],
+            scratch: vec![0u8; 1024 * BLOCK_SIZE],
         })
     }
 

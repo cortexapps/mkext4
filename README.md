@@ -77,10 +77,14 @@ inode counts, both non-lazy, output gated on `e2fsck -fn`:
 
 | benchmark | platform | mke2fs 1.47.4 | mkext4 | speedup |
 |---|---|---|---|---|
-| ~120k small files (node_modules-like) | macOS, M-series/APFS | 8.02 s | 4.13 s | **1.9×** |
+| ~120k small files (node_modules-like) | macOS, M-series/APFS | 6.08 s | 3.50 s | **1.7×** |
 | | Linux, GitHub runner/ext4 | 8.76 s | 1.94 s | **4.5×** |
-| ~4.2 GiB tree with multi-GiB files | macOS, M-series/APFS | 19.3 s | 3.42 s | **5.6×** |
+| ~4.2 GiB tree with multi-GiB files | macOS, M-series/APFS | 20.5 s | 3.51 s | **5.8×** |
 | | Linux, GitHub runner/ext4 | 45.3 s | 35.3 s | **1.3×** |
+
+Profiling shows mkext4 spends under 3% of wall time in its own code —
+the rest is read/stat/pwrite syscalls against the source tree and
+output file, i.e. the tool runs at filesystem speed.
 
 The CI bench lane fails if mkext4 ever loses. The one-pass design is
 the difference: no staged tree re-walk, metadata computed once, and

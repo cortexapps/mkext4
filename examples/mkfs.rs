@@ -7,7 +7,6 @@
 //! walked in sorted order, hardlinks detected by (dev, ino).
 
 use std::collections::HashMap;
-use std::io::BufReader;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
 
@@ -115,8 +114,8 @@ fn main() {
     let mut sink = FileSink::create(Path::new(out), layout.image_len()).expect("create output");
     let mut w = layout.writer(&mut sink).expect("writer");
     for (handle, path) in &fills {
-        let f = std::fs::File::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        w.fill(*handle, &mut BufReader::with_capacity(1 << 20, f))
+        let mut f = std::fs::File::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        w.fill(*handle, &mut f)
             .unwrap_or_else(|e| panic!("fill {}: {e}", path.display()));
     }
     let summary = w.finish().expect("finish");
