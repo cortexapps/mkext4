@@ -72,7 +72,7 @@ for i in range(n):
     os.close(os.open(os.path.join(d, "entry_%05d_pad" % i), os.O_CREAT | os.O_WRONLY, 0o644))
 EOF
     # >32768 blocks so the extent tree needs >1 extent (contiguous alloc)
-    dd if=/dev/urandom of="$t/big200" bs=1m count=200 2>/dev/null
+    dd if=/dev/urandom of="$t/big200" bs=1048576 count=200 2>/dev/null
     # files to receive xattrs via debugfs post-ops
     : > "$t/xattr_ibody"; : > "$t/xattr_block"; : > "$t/xattr_mixed"
 }
@@ -88,7 +88,7 @@ for i in range(n):
     os.close(os.open(os.path.join(d, "node_%06d_padpadpad" % i), os.O_CREAT | os.O_WRONLY, 0o644))
 EOF
     # >4*32768 blocks contiguous => >4 extents => depth-1 extent tree
-    dd if=/dev/urandom of="$t/big600" bs=1m count=600 2>/dev/null
+    dd if=/dev/urandom of="$t/big600" bs=1048576 count=600 2>/dev/null
     # 5GiB sparse file: 64MiB data at 0, at 2GiB, and at the tail
     python3 - "$t/giant_sparse" <<'EOF'
 import os, sys
