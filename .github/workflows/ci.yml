@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      flat_entries:
+        description: "flat-dir benchmark size (120000 = headline run)"
+        default: "20000"
 
 env:
   # The format oracle. The design's verified claims are against this
@@ -97,3 +102,5 @@ jobs:
         run: sudo apt-get install -y -qq hyperfine >/dev/null
       - name: Benchmarks (must beat mke2fs)
         run: ASSERT_FASTER=1 tools/bench.sh build/bench
+        env:
+          FLAT_ENTRIES: ${{ inputs.flat_entries || '20000' }}
