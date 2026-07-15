@@ -92,10 +92,19 @@ inode counts, both non-lazy, output gated on `e2fsck -fn`:
 
 | benchmark | platform | mke2fs 1.47.4 | mkext4 | speedup |
 |---|---|---|---|---|
-| ~120k small files (node_modules-like) | macOS, M-series/APFS | 6.08 s | 3.50 s | **1.7×** |
-| | Linux, GitHub runner/ext4 | 5.57 s | 1.57 s | **3.5×** |
-| ~4.2 GiB tree with multi-GiB files | macOS, M-series/APFS | 20.5 s | 3.51 s | **5.8×** |
-| | Linux, GitHub runner/ext4 | 26.8 s | 5.49 s | **4.9×** |
+| ~120k small files (node_modules-like) | macOS, M-series/APFS | 6.83 s | 3.25 s | **2.1×** |
+| | Linux, GitHub runner/ext4 | 5.88 s | 1.73 s | **3.4×** |
+| 120k files in ONE directory (pnpm-store-like) | macOS, M-series/APFS | 401 s | 5.88 s | **68×** |
+| | Linux, GitHub runner/ext4 | 506 s | 1.67 s | **303×** |
+| ~4.2 GiB tree with multi-GiB files | macOS, M-series/APFS | 17.5 s | 3.14 s | **5.6×** |
+| | Linux, GitHub runner/ext4 | 28.9 s | 5.39 s | **5.4×** |
+
+The flat-directory row is not a typo: `mke2fs -d` inserts dirents by
+linear scan, so a single huge directory is quadratic — over eight
+*minutes* for a shape a pnpm store hits routinely. mkext4 builds the
+htree in one pass and stays at filesystem speed. (The recurring CI gate
+runs a 20k-entry flat dir to keep runs short — still 55× on Linux;
+the 120k headline above comes from a dispatched full-size run.)
 
 Profiling shows mkext4 spends under 3% of wall time in its own code —
 the rest is read/stat/pwrite syscalls against the source tree and
